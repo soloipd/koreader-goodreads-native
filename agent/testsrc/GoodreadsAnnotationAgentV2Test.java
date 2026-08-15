@@ -11,16 +11,15 @@ import java.util.List;
 import java.util.Map;
 import testsupport.Fakes;
 
-public final class GoodreadsAnnotationAgentV1Test {
+public final class GoodreadsAnnotationAgentV2Test {
     private static final String ASIN = "B0FLB24198";
     private static final String START = "AAAAAAAAAAAA";
     private static final String END = "AAAAAAAAAAAB";
     private static final String OTHER_START = "AAAAAAAAAAAC";
     private static final String OTHER_END = "AAAAAAAAAAAD";
-    private static final Path RESULT = Paths.get("/tmp/goodreads-annotation-result.log");
     private static int requestSequence = 10000000;
 
-    private GoodreadsAnnotationAgentV1Test() {}
+    private GoodreadsAnnotationAgentV2Test() {}
 
     public static void main(String[] ignored) throws Exception {
         Fakes.SDK sdk = new Fakes.SDK();
@@ -70,7 +69,6 @@ public final class GoodreadsAnnotationAgentV1Test {
         expect("validate_payload", rejected.get("failed_stage"), "malformed input must fail before opening");
         expect(beforeMalformed, sdk.content.manager.annotations.size(), "malformed input must not mutate native state");
 
-        Files.deleteIfExists(RESULT);
         System.out.println("Annotation agent behavior tests passed.");
     }
 
@@ -120,23 +118,25 @@ public final class GoodreadsAnnotationAgentV1Test {
         payload.addAll(prior);
         String requestId = value(payload, "request_id");
         Path path = Paths.get("/tmp/goodreads-annotations-" + requestId + ".properties");
+        Path result = Paths.get("/tmp/goodreads-annotation-result-" + requestId + ".log");
         Files.write(path, payload, StandardCharsets.ISO_8859_1);
-        Files.deleteIfExists(RESULT);
-        GoodreadsAnnotationAgentV1.agentmain(path.toString(), null);
-        Files.deleteIfExists(path);
-        Map<String, String> result = readResult();
-        if (result.containsKey("asin") || result.containsKey("request_id")) {
-            expect(ASIN, result.get("asin"), "result ASIN should match");
-            expect(requestId, result.get("request_id"), "result request should match");
+        Files.deleteIfExists(result);
+        GoodreadsAnnotationAgentV2.agentmain(path.toString(), null);
+        expect(false, Files.exists(path), "agent must remove payload after loading it");
+        Map<String, String> fields = readResult(result);
+        Files.deleteIfExists(result);
+        if (fields.containsKey("asin") || fields.containsKey("request_id")) {
+            expect(ASIN, fields.get("asin"), "result ASIN should match");
+            expect(requestId, fields.get("request_id"), "result request should match");
         } else {
-            expect("false", result.get("success"), "only pre-correlation validation failures may omit IDs");
+            expect("false", fields.get("success"), "only pre-correlation validation failures may omit IDs");
         }
-        return result;
+        return fields;
     }
 
-    private static Map<String, String> readResult() throws Exception {
+    private static Map<String, String> readResult(Path result) throws Exception {
         Map<String, String> fields = new HashMap<String, String>();
-        for (String line : Files.readAllLines(RESULT, StandardCharsets.UTF_8)) {
+        for (String line : Files.readAllLines(result, StandardCharsets.UTF_8)) {
             int separator = line.indexOf('=');
             if (separator > 0) {
                 fields.put(line.substring(0, separator), line.substring(separator + 1));
