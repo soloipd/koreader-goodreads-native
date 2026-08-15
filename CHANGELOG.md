@@ -3,6 +3,14 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] - 2026-08-15
+
+### Fixed
+
+- Agent-manifest validation now accepts both LF and JAR-specification CRLF line
+  endings, so clean JDK builds validate consistently across environments.
+- Archive checks now print the exact missing invariant when they fail.
+
 ## [0.1.1] - 2026-08-15
 
 ### Fixed
