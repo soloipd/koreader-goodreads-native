@@ -92,5 +92,9 @@ rejected instead of guessed.
 
 The native bridge reconciles against the explicitly opened KFX book and uses
 the native annotation manager for create, update, and delete operations.
+Persisted annotations may report their start and end positions in the opposite
+order from the translated KOReader range. Reconciliation therefore identifies
+ranges without direction and attaches notes using the persisted highlight's
+native endpoint order.
 Visibility remains governed by the Kindle/Amazon annotation pipeline; the
 plugin does not invent or override a public-sharing flag.

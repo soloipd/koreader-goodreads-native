@@ -17,8 +17,8 @@ import java.util.Properties;
 import java.util.Set;
 
 /** Reconciles KOReader highlights with the native Kindle annotation store. */
-public final class GoodreadsAnnotationAgentV2 {
-    private GoodreadsAnnotationAgentV2() {}
+public final class GoodreadsAnnotationAgentV3 {
+    private GoodreadsAnnotationAgentV3() {}
 
     public static void agentmain(String payloadPath, Instrumentation instrumentation) {
         PrintWriter out;
@@ -85,6 +85,13 @@ public final class GoodreadsAnnotationAgentV2 {
                     }
                     existing.put(highlightKey, highlight);
                     counters.highlightsCreated++;
+                } else {
+                    // Some Kindle content engines return persisted annotation
+                    // endpoints in the opposite order from the translated
+                    // KOReader range. Use the native object's ordering when
+                    // attaching a note so the manager accepts it.
+                    start = highlight.getClass().getMethod("jh").invoke(highlight);
+                    end = highlight.getClass().getMethod("jd").invoke(highlight);
                 }
 
                 String noteKey = typedKey(2, record.startLong, record.endLong);
@@ -225,7 +232,7 @@ public final class GoodreadsAnnotationAgentV2 {
             if (!"0".equals(noteFlag) && !"1".equals(noteFlag)) {
                 throw new IllegalArgumentException("invalid previous note state");
             }
-            keys.put(positions[0] + ":" + positions[1], Boolean.valueOf("1".equals(noteFlag)));
+            keys.put(pairKey(positions[0], positions[1]), Boolean.valueOf("1".equals(noteFlag)));
         }
         return keys;
     }
@@ -369,7 +376,11 @@ public final class GoodreadsAnnotationAgentV2 {
     }
 
     private static String typedKey(int type, String start, String end) {
-        return type + ":" + start + ":" + end;
+        return type + ":" + pairKey(start, end);
+    }
+
+    private static String pairKey(String start, String end) {
+        return start.compareTo(end) <= 0 ? start + ":" + end : end + ":" + start;
     }
 
     private static String[] splitRangeKey(String value) {
@@ -406,7 +417,7 @@ public final class GoodreadsAnnotationAgentV2 {
         }
 
         private String rangeKey() {
-            return startLong + ":" + endLong;
+            return pairKey(startLong, endLong);
         }
     }
 
