@@ -12,6 +12,11 @@ sh -n "$plugin_dir/bin/sync-rating"
 sh -n "$plugin_dir/bin/sync-annotations"
 grep -Fq 'chown "$framework_uid:$framework_gid" "$payload"' "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: annotation payload is not transferred to the framework JVM user\n' >&2; exit 1; }
+grep -Fq 'KSDKAnnotationsEnqueueForSync' "$plugin_dir/bin/sync-annotations" \
+    || { printf 'error: native annotation sync is not explicitly enqueued\n' >&2; exit 1; }
+grep -Fq "'local_success=true' 'sync_enqueued=false' 'success=false'" \
+    "$plugin_dir/bin/sync-annotations" \
+    || { printf 'error: enqueue failure is not reflected in overall success\n' >&2; exit 1; }
 
 if command -v shellcheck >/dev/null 2>&1; then
     # ShellCheck's informational findings include false positives for the
