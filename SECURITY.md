@@ -18,8 +18,11 @@ extension:
 
 The plugin accepts only a ten-character Amazon ASIN beginning with `B` and an
 integer percentage from 1 through 100. It does not accept or persist account
-credentials. The Java agent writes only a sanitized success/failure result to
-`/tmp`; the shell helper persists only the last successful percentage per ASIN.
+credentials. Agents write only sanitized success/failure results to `/tmp`.
+Annotation text is carried in a size-bounded, mode-0600 transient `/tmp`
+payload, removed after every attempt, and then handled by the Kindle's native
+annotation store. Persistent plugin annotation state contains coordinate keys
+only; logs never accept annotation text.
 
 ## Reporting a vulnerability
 
