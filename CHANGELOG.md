@@ -32,6 +32,9 @@ All notable changes to this project are documented here. The project follows
 - Already accepted percentages are suppressed before a Java-agent attachment.
 - Interval-menu changes now invalidate the previous timer, apply immediately,
   and emit an explicit redacted diagnostics event.
+- Native annotation ranges are matched independent of endpoint direction, and
+  notes reuse the persisted highlight's native endpoint order. This prevents a
+  duplicate-highlight rejection when firmware reverses a saved range.
 
 ## [0.2.0] - 2026-08-15
 
