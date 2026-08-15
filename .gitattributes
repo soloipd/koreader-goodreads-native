@@ -1,0 +1,6 @@
+*.class binary
+*.jar binary
+*.zip binary
+*.lua text eol=lf
+*.sh text eol=lf
+*.java text eol=lf

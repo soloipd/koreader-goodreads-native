@@ -1,0 +1,103 @@
+#!/bin/sh
+
+# Send one silent percentage update through the running Kindle Java framework.
+# The framework supplies its own Amazon/Goodreads session; this helper accepts
+# no account credentials and persists only the last successfully sent percent.
+
+set -u
+
+JAVA_BIN="/usr/java/bin/java"
+PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
+AGENT_JAR="$PLUGIN_DIR/bin/goodreads-progress-agent-v2.jar"
+LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
+STATE_DIR="/mnt/us/koreader/settings/goodreads_native_progress"
+LOCK_DIR="/tmp/goodreads-progress-sync.lock"
+RESULT_FILE="/tmp/goodreads-progress-result.log"
+ATTACH_LOG="/tmp/goodreads-progress-attach.log"
+
+if [ "$#" -ne 2 ]; then
+    exit 2
+fi
+
+asin="$1"
+percent="$2"
+
+if ! printf '%s\n' "$asin" | grep -Eq '^B[A-Z0-9]{9}$'; then
+    exit 2
+fi
+
+case "$percent" in
+    ''|*[!0-9]*) exit 2 ;;
+esac
+
+if [ "$percent" -lt 1 ] || [ "$percent" -gt 100 ]; then
+    exit 2
+fi
+
+if [ ! -x "$JAVA_BIN" ] || [ ! -r "$AGENT_JAR" ] \
+    || [ ! -r "$LAUNCHER_CLASSES/AttachLauncher.class" ]; then
+    exit 3
+fi
+
+if ! mkdir -p "$STATE_DIR"; then
+    exit 4
+fi
+
+state_file="$STATE_DIR/$asin"
+if [ -r "$state_file" ] && [ "$(sed -n '1p' "$state_file")" = "$percent" ]; then
+    exit 0
+fi
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    exit 75
+fi
+
+cleanup_lock() {
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+trap cleanup_lock EXIT HUP INT TERM
+
+# Another invocation may have completed while this process waited for setup.
+if [ -r "$state_file" ] && [ "$(sed -n '1p' "$state_file")" = "$percent" ]; then
+    exit 0
+fi
+
+framework_pid="$(
+    ps -eo pid,args 2>/dev/null \
+        | awk '/ch.ethz.iks.concierge.framework.Framework/ && !/awk/ { print $1; exit }'
+)"
+
+case "$framework_pid" in
+    ''|*[!0-9]*) exit 5 ;;
+esac
+
+request_id="$$"
+agent_arguments="$asin,$percent,reader.eink"
+
+# A missing result after attachment must never be mistaken for an earlier
+# success. The file lives only in /tmp and is recreated by the agent.
+rm -f "$RESULT_FILE"
+
+if ! "$JAVA_BIN" --add-modules jdk.attach \
+    -cp "$LAUNCHER_CLASSES" \
+    AttachLauncher "$framework_pid" "$AGENT_JAR" "$agent_arguments" \
+    >"$ATTACH_LOG" 2>&1; then
+    exit 6
+fi
+
+if ! grep -Fqx "asin=$asin" "$RESULT_FILE" \
+    || ! grep -Fqx "percent=$percent" "$RESULT_FILE" \
+    || ! grep -Fqx 'success=true' "$RESULT_FILE"; then
+    exit 7
+fi
+
+state_temp="$state_file.$request_id"
+if ! printf '%s\n' "$percent" >"$state_temp"; then
+    exit 8
+fi
+
+if ! mv -f "$state_temp" "$state_file"; then
+    exit 8
+fi
+
+exit 0
