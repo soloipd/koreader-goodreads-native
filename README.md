@@ -153,6 +153,9 @@ suspend, close, and the manual sync action. The coordinate map contains no book
 or annotation text. Rapid changes are serialized: the latest snapshot for each
 book replaces stale queued work, transient failures retry up to three times,
 and close-time snapshots can retry after the reader UI has unloaded the book.
+After each successful reconciliation, the helper explicitly enqueues Amazon's
+native annotation sync client; diagnostics distinguish local reconciliation
+from successful native queueing.
 
 Annotation text exists only in KOReader's own metadata, a mode-0600 transient
 request under `/tmp`, and the native Kindle annotation store. Transient

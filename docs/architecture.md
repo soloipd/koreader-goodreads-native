@@ -95,7 +95,9 @@ mode-0600 payload carries note text. Ownership is transferred from KOReader's
 root process to the framework JVM's dynamically resolved UID/GID, then the V2 agent removes it
 immediately after loading, with bounded fallback cleanup by the helper; persistent plugin
 state contains coordinate keys only. Diagnostics expose only counts and
-sanitized success/failure stages. Only one native annotation request runs at a
+sanitized success/failure stages. After local reconciliation, the shell
+explicitly invokes `KSDKAnnotationsEnqueueForSync`; a failed enqueue is treated
+as retryable and is not reported as end-to-end success. Only one native annotation request runs at a
 time. Rapid edits for the same ASIN coalesce to the newest immutable snapshot,
 while snapshots for other books remain queued. Transient native failures retry
 up to three times; a newer same-book snapshot cancels an older retry. Because
