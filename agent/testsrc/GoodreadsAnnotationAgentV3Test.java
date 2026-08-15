@@ -11,7 +11,7 @@ import java.util.List;
 import java.util.Map;
 import testsupport.Fakes;
 
-public final class GoodreadsAnnotationAgentV2Test {
+public final class GoodreadsAnnotationAgentV3Test {
     private static final String ASIN = "B0FLB24198";
     private static final String START = "AAAAAAAAAAAA";
     private static final String END = "AAAAAAAAAAAB";
@@ -19,7 +19,7 @@ public final class GoodreadsAnnotationAgentV2Test {
     private static final String OTHER_END = "AAAAAAAAAAAD";
     private static int requestSequence = 10000000;
 
-    private GoodreadsAnnotationAgentV2Test() {}
+    private GoodreadsAnnotationAgentV3Test() {}
 
     public static void main(String[] ignored) throws Exception {
         Fakes.SDK sdk = new Fakes.SDK();
@@ -57,17 +57,33 @@ public final class GoodreadsAnnotationAgentV2Test {
         expect(1, sdk.content.manager.annotations.size(), "native-only highlight must be preserved");
         expect(nativeOnly, sdk.content.manager.annotations.get(0), "native-only object must be unchanged");
 
-        int beforeMalformed = sdk.content.manager.annotations.size();
+        Fakes.SDK reversedSdk = new Fakes.SDK();
+        Framework.setService(reversedSdk);
+        reversedSdk.content.manager.annotations.add(new Highlight(
+            new Fakes.Position(END),
+            new Fakes.Position(START)
+        ));
+        Map<String, String> reversed = run(
+            reversedSdk,
+            desired("note on reversed native range"),
+            previous(START, END, false)
+        );
+        expect("true", reversed.get("success"), "reversed native range should reconcile");
+        expect("0", reversed.get("highlights_created"), "existing reversed highlight must be reused");
+        expect("1", reversed.get("notes_created"), "note should attach using native endpoint order");
+        expect(2, reversedSdk.content.manager.annotations.size(), "reversed range must not duplicate highlight");
+
+        int beforeMalformed = reversedSdk.content.manager.annotations.size();
         List<String> malformed = basePayload();
         malformed.add("desired_count=1");
         malformed.add("desired.0.start=bad");
         malformed.add("desired.0.end=" + END);
         malformed.add("desired.0.note_hex=");
         malformed.add("previous_count=0");
-        Map<String, String> rejected = run(sdk, malformed, previous());
+        Map<String, String> rejected = run(reversedSdk, malformed, previous());
         expect("false", rejected.get("success"), "malformed position must fail");
         expect("validate_payload", rejected.get("failed_stage"), "malformed input must fail before opening");
-        expect(beforeMalformed, sdk.content.manager.annotations.size(), "malformed input must not mutate native state");
+        expect(beforeMalformed, reversedSdk.content.manager.annotations.size(), "malformed input must not mutate native state");
 
         System.out.println("Annotation agent behavior tests passed.");
     }
@@ -121,7 +137,7 @@ public final class GoodreadsAnnotationAgentV2Test {
         Path result = Paths.get("/tmp/goodreads-annotation-result-" + requestId + ".log");
         Files.write(path, payload, StandardCharsets.ISO_8859_1);
         Files.deleteIfExists(result);
-        GoodreadsAnnotationAgentV2.agentmain(path.toString(), null);
+        GoodreadsAnnotationAgentV3.agentmain(path.toString(), null);
         expect(false, Files.exists(path), "agent must remove payload after loading it");
         Map<String, String> fields = readResult(result);
         Files.deleteIfExists(result);
