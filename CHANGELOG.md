@@ -3,6 +3,14 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] - 2026-08-15
+
+### Fixed
+
+- The Goodreads submenu now declares KOReader's `more_tools` sorting hint, so
+  it reliably appears under **Tools → More tools** instead of as an orphaned
+  `NEW:` item in the first menu tab.
+
 ## [0.1.2] - 2026-08-15
 
 ### Fixed

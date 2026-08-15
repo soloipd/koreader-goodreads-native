@@ -49,7 +49,7 @@ Compatibility reports are welcome.
    ```
 
 3. Restart KOReader once.
-4. Open **Main menu → Tools → Goodreads (native Kindle sync)**.
+4. Open **Main menu → Tools → More tools → Goodreads (native Kindle sync)**.
 5. Leave **Automatic shelf sync** and **Silent percentage sync** enabled.
 
 For an SSH installation from the repository checkout:
