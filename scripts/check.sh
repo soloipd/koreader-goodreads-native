@@ -45,10 +45,15 @@ test -s "$agent_jar"
 test -s "$plugin_dir/bin/classes/AttachLauncher.class"
 unzip -tq "$agent_jar"
 unzip -p "$agent_jar" META-INF/MANIFEST.MF \
-    | grep -Fqx 'Agent-Class: GoodreadsProgressAgentV2'
-unzip -Z1 "$agent_jar" | grep -Fqx 'GoodreadsProgressAgentV2.class'
+    | tr -d '\r' \
+    | grep -Fqx 'Agent-Class: GoodreadsProgressAgentV2' \
+    || { printf 'error: agent manifest has the wrong Agent-Class\n' >&2; exit 1; }
 unzip -Z1 "$agent_jar" \
-    | grep -Fqx 'GoodreadsProgressAgentV2$RequestArguments.class'
+    | grep -Fqx 'GoodreadsProgressAgentV2.class' \
+    || { printf 'error: agent JAR lacks its main class\n' >&2; exit 1; }
+unzip -Z1 "$agent_jar" \
+    | grep -Fqx 'GoodreadsProgressAgentV2$RequestArguments.class' \
+    || { printf 'error: agent JAR lacks its argument parser class\n' >&2; exit 1; }
 
 if grep -R -E -q \
     'github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16}' \
