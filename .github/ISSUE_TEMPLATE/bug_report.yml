@@ -1,0 +1,59 @@
+name: Bug report
+description: Report a reproducible shelf or percentage synchronization failure.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove credentials, device serial numbers, account identifiers, and session data from every log excerpt.
+
+  - type: input
+    id: firmware
+    attributes:
+      label: Kindle firmware
+      placeholder: "5.19.5"
+    validations:
+      required: true
+
+  - type: input
+    id: koreader
+    attributes:
+      label: KOReader version
+      placeholder: "v2026.07.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: path
+    attributes:
+      label: Failure path
+      options:
+        - Shelf status
+        - Silent percentage
+        - Both
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Use a placeholder ASIN; do not post your account data.
+    validations:
+      required: true
+
+  - type: textarea
+    id: result
+    attributes:
+      label: Sanitized result
+      description: Include only failed_stage, error_class, HTTP status, response_valid, error_envelope, and success.
+      render: text
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I removed all credentials, session tokens, device identifiers, and account data.
+          required: true

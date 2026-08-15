@@ -1,0 +1,5 @@
+.DS_Store
+/agent/build/
+/dist/
+*.bak
+*.log
