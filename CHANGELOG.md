@@ -3,6 +3,36 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-08-15
+
+### Added
+
+- Live percentage checkpoints shortly after opening a book, periodically while
+  reading, on suspend/resume, on close, and through the existing manual action.
+- A configurable 2, 5, 10, or 15 minute periodic-sync interval (5 minutes by
+  default).
+- An opt-in, 128 KiB rotating diagnostics log containing only redacted sync
+  metadata and native success/failure fields.
+- An in-device **Show sync diagnostics** view comparing the live percentage,
+  last accepted percentage, and latest native service result.
+- Exact, text-free KFX-to-EPUB position mapping and batched normalized-XPointer
+  translation for converted Kindle books.
+- Native highlight create/delete and private note create/edit/delete
+  reconciliation on open, annotation changes, suspend, close, and manual sync.
+- Annotation diagnostics containing counts and sanitized native result fields;
+  note and highlight text is never logged or retained in plugin state.
+- Lua behavior tests for live-progress precedence and active-hook settings.
+
+### Fixed
+
+- Automatic sync now reads `ReaderPaging`/`ReaderRolling` live progress instead
+  of a stale `percent_finished` sidecar value while a document is open.
+- The global close hook now resolves the active ReaderUI plugin instance, so
+  automatic hooks honor settings changed from the reader menu.
+- Already accepted percentages are suppressed before a Java-agent attachment.
+- Interval-menu changes now invalidate the previous timer, apply immediately,
+  and emit an explicit redacted diagnostics event.
+
 ## [0.2.0] - 2026-08-15
 
 ### Added
