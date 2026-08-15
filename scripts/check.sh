@@ -10,6 +10,8 @@ annotation_agent_jar="$plugin_dir/bin/goodreads-annotation-agent-v2.jar"
 sh -n "$plugin_dir/bin/sync-progress"
 sh -n "$plugin_dir/bin/sync-rating"
 sh -n "$plugin_dir/bin/sync-annotations"
+grep -Fq 'chown "$framework_uid:$framework_gid" "$payload"' "$plugin_dir/bin/sync-annotations" \
+    || { printf 'error: annotation payload is not transferred to the framework JVM user\n' >&2; exit 1; }
 
 if command -v shellcheck >/dev/null 2>&1; then
     # ShellCheck's informational findings include false positives for the

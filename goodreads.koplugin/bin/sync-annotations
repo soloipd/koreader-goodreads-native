@@ -74,6 +74,11 @@ framework_pid="$(
 case "$framework_pid" in
     ''|*[!0-9]*) exit 5 ;;
 esac
+framework_uid="$(awk '/^Uid:/ { print $2; exit }' "/proc/$framework_pid/status" 2>/dev/null)"
+framework_gid="$(awk '/^Gid:/ { print $2; exit }' "/proc/$framework_pid/status" 2>/dev/null)"
+case "$framework_uid:$framework_gid" in
+    *[!0-9:]*|:|:*|*:) exit 5 ;;
+esac
 
 state_file="$STATE_DIR/$asin"
 state_temp="$state_file.$$"
@@ -96,6 +101,14 @@ if ! awk -F= '
     exit 8
 fi
 chmod 0600 "$state_temp"
+
+# KOReader and this helper run as root, but Amazon's framework JVM runs under a
+# firmware-specific account. Resolve its numeric identity from /proc instead of
+# assuming passwd/group names. Java reports EACCES here as FileNotFoundException,
+# which otherwise looks like an attach timing failure.
+if ! chown "$framework_uid:$framework_gid" "$payload" || ! chmod 0600 "$payload"; then
+    exit 9
+fi
 
 rm -f "$request_result"
 if ! "$JAVA_BIN" --add-modules jdk.attach \
