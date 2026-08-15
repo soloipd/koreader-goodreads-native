@@ -70,3 +70,27 @@ origin. An invalid rating of 6 was confirmed to return `lipcErrInvalidArg`.
 `EndActions.jar` also exposes the native interactive completion route through
 `com.lab126.reading_actions / launchEndActions`, but the plugin uses the
 smaller `rateABook` surface after collecting an explicit choice in KOReader.
+
+## Annotation boundary
+
+KOReader emits `AnnotationsModified` for highlight/note creation, edits, and
+deletions. The plugin can safely observe these events and count annotation
+types without reading text into its log.
+
+Firmware 5.19.5 exposes both `com.lab126.CVMAnnotationProxy / sendAnnotations`
+and direct `ReaderContentSDK` annotation management. Sanitized read-only probes
+confirmed native type `1` for highlights and type `2` for text notes. The
+12-character native long position decodes to nine bytes: a version byte,
+little-endian 32-bit KFX EID, and little-endian 32-bit EID offset. The short
+position is the KFX base PID plus that offset.
+
+The converter branch now writes a versioned, text-free position map and tags
+converted elements with their KFX anchor. The runtime translator follows the
+EPUB spine and KOReader's normalized XPointer, then calculates the Unicode
+offset from the nearest tagged ancestor. Ambiguous EID-to-base-PID mappings are
+rejected instead of guessed.
+
+The native bridge reconciles against the explicitly opened KFX book and uses
+the native annotation manager for create, update, and delete operations.
+Visibility remains governed by the Kindle/Amazon annotation pipeline; the
+plugin does not invent or override a public-sharing flag.
