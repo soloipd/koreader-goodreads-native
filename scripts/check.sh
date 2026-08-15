@@ -81,6 +81,25 @@ grep -Fqx 'Agent-Class: GoodreadsAnnotationAgentV1' <<<"$annotation_manifest" \
 grep -Fqx 'GoodreadsAnnotationAgentV1.class' <<<"$annotation_entries" \
     || { printf 'error: annotation agent JAR lacks its main class\n' >&2; exit 1; }
 
+javac_bin="${JAVAC:-javac}"
+java_bin="${JAVA:-java}"
+annotation_test_dir="$project_root/agent/build/annotation-tests"
+annotation_test_sources=()
+while IFS= read -r source; do
+    annotation_test_sources+=("$source")
+done < <(find "$project_root/agent/testsrc" -type f -name '*.java' | sort)
+
+if command -v "$javac_bin" >/dev/null 2>&1 && command -v "$java_bin" >/dev/null 2>&1; then
+    rm -rf "$annotation_test_dir"
+    mkdir -p "$annotation_test_dir"
+    "$javac_bin" --release 8 -Xlint:-options -d "$annotation_test_dir" \
+        "$project_root/agent/src/GoodreadsAnnotationAgentV1.java" \
+        "${annotation_test_sources[@]}"
+    "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationAgentV1Test
+else
+    printf 'warning: Java toolchain unavailable; annotation agent behavior tests were skipped\n' >&2
+fi
+
 if grep -R -E -q \
     'github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16}' \
     --exclude-dir=.git --exclude='*.jar' --exclude='*.class' "$project_root"; then
