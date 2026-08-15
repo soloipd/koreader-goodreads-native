@@ -7,6 +7,7 @@ source_dir="$project_root/agent/src"
 build_dir="$project_root/agent/build/jdk"
 classes_dir="$build_dir/classes"
 agent_jar="$project_root/goodreads.koplugin/bin/goodreads-progress-agent-v2.jar"
+annotation_agent_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-agent-v1.jar"
 launcher_class="$project_root/goodreads.koplugin/bin/classes/AttachLauncher.class"
 
 javac_bin="${JAVAC:-javac}"
@@ -17,14 +18,22 @@ mkdir -p "$classes_dir" "$(dirname "$agent_jar")" "$(dirname "$launcher_class")"
 
 "$javac_bin" --release 8 -d "$classes_dir" \
     "$source_dir/AttachLauncher.java" \
-    "$source_dir/GoodreadsProgressAgentV2.java"
+    "$source_dir/GoodreadsProgressAgentV2.java" \
+    "$source_dir/GoodreadsAnnotationAgentV1.java"
 
 "$jar_bin" cfm "$agent_jar" "$project_root/agent/manifest-progress.mf" \
     -C "$classes_dir" GoodreadsProgressAgentV2.class \
     -C "$classes_dir" 'GoodreadsProgressAgentV2$RequestArguments.class'
 
+"$jar_bin" cfm "$annotation_agent_jar" "$project_root/agent/manifest-annotations.mf" \
+    -C "$classes_dir" GoodreadsAnnotationAgentV1.class \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV1$Record.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV1$Counters.class'
+
 cp "$classes_dir/AttachLauncher.class" "$launcher_class"
-chmod 0644 "$agent_jar" "$launcher_class"
-chmod 0755 "$project_root/goodreads.koplugin/bin/sync-progress"
+chmod 0644 "$agent_jar" "$annotation_agent_jar" "$launcher_class"
+chmod 0755 "$project_root/goodreads.koplugin/bin/sync-progress" \
+    "$project_root/goodreads.koplugin/bin/sync-annotations"
 
 printf 'Built %s\n' "$agent_jar"
+printf 'Built %s\n' "$annotation_agent_jar"

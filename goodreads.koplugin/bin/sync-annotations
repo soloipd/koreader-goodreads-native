@@ -1,0 +1,120 @@
+#!/bin/sh
+
+# Reconcile one book's KOReader annotations with the native Kindle sidecar.
+# The caller creates a mode-0600 payload in /tmp; this helper always removes it.
+
+set -u
+
+JAVA_BIN="/usr/java/bin/java"
+PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
+AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v1.jar"
+LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
+STATE_DIR="/mnt/us/koreader/settings/goodreads_native_annotations"
+LOCK_DIR="/tmp/goodreads-annotation-sync.lock"
+RESULT_FILE="/tmp/goodreads-annotation-result.log"
+ATTACH_LOG="/tmp/goodreads-annotation-attach.log"
+lock_acquired=0
+
+if [ "$#" -ne 1 ]; then
+    exit 2
+fi
+
+payload="$1"
+case "$payload" in
+    /tmp/goodreads-annotations-[0-9]*.properties) ;;
+    *) exit 2 ;;
+esac
+
+cleanup() {
+    rm -f "$payload"
+    if [ "$lock_acquired" -eq 1 ]; then
+        rmdir "$LOCK_DIR" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+
+if [ ! -f "$payload" ] || [ ! -x "$JAVA_BIN" ] || [ ! -r "$AGENT_JAR" ] \
+    || [ ! -r "$LAUNCHER_CLASSES/AttachLauncher.class" ]; then
+    exit 3
+fi
+
+asin="$(sed -n 's/^asin=//p' "$payload" | sed -n '1p')"
+request_id="$(sed -n 's/^request_id=//p' "$payload" | sed -n '1p')"
+if ! printf '%s\n' "$asin" | grep -Eq '^B[A-Z0-9]{9}$'; then
+    exit 2
+fi
+case "$request_id" in
+    ''|*[!0-9]*) exit 2 ;;
+esac
+
+if ! mkdir -p "$STATE_DIR"; then
+    exit 4
+fi
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    exit 75
+fi
+lock_acquired=1
+
+framework_pid="$(
+    ps -eo pid,args 2>/dev/null \
+        | awk '/ch.ethz.iks.concierge.framework.Framework/ && !/awk/ { print $1; exit }'
+)"
+case "$framework_pid" in
+    ''|*[!0-9]*) exit 5 ;;
+esac
+
+rm -f "$RESULT_FILE"
+if ! "$JAVA_BIN" --add-modules jdk.attach \
+    -cp "$LAUNCHER_CLASSES" \
+    AttachLauncher "$framework_pid" "$AGENT_JAR" "$payload" \
+    >"$ATTACH_LOG" 2>&1; then
+    exit 6
+fi
+
+# Some Kindle JVM builds acknowledge loadAgent before agentmain has opened its
+# argument file. Keep the private payload alive until the matching result is
+# complete; otherwise the EXIT trap can remove it underneath the agent.
+result_attempt=0
+while [ "$result_attempt" -lt 25 ]; do
+    if [ -f "$RESULT_FILE" ] \
+        && grep -Fqx "asin=$asin" "$RESULT_FILE" \
+        && grep -Fqx "request_id=$request_id" "$RESULT_FILE" \
+        && grep -Eq '^success=(true|false)$' "$RESULT_FILE"; then
+        break
+    fi
+    result_attempt=$((result_attempt + 1))
+    sleep 1
+done
+
+if ! grep -Fqx "asin=$asin" "$RESULT_FILE" \
+    || ! grep -Fqx "request_id=$request_id" "$RESULT_FILE" \
+    || ! grep -Fqx 'success=true' "$RESULT_FILE"; then
+    exit 7
+fi
+
+state_file="$STATE_DIR/$asin"
+state_temp="$state_file.$$"
+if ! awk -F= '
+    /^desired\.[0-9]+\.start=/ {
+        key=$1; sub(/\.start$/, "", key); start[key]=$2
+    }
+    /^desired\.[0-9]+\.end=/ {
+        key=$1; sub(/\.end$/, "", key); finish[key]=$2
+    }
+    /^desired\.[0-9]+\.note_hex=/ {
+        key=$1; sub(/\.note_hex$/, "", key); note[key]=($2 == "" ? "0" : "1")
+    }
+    END {
+        for (key in start) {
+            if (finish[key] != "") print start[key] ":" finish[key] ":" note[key]
+        }
+    }
+' "$payload" >"$state_temp"; then
+    exit 8
+fi
+chmod 0600 "$state_temp"
+if ! mv -f "$state_temp" "$state_file"; then
+    exit 8
+fi
+
+exit 0
