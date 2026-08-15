@@ -51,6 +51,7 @@ local ANNOTATION_RESULT_KEYS = {
     asin = true,
     request_id = true,
     requested = true,
+    local_success = true,
     success = true,
     failed_stage = true,
     error_class = true,
@@ -59,6 +60,7 @@ local ANNOTATION_RESULT_KEYS = {
     notes_created = true,
     notes_updated = true,
     notes_deleted = true,
+    sync_enqueued = true,
 }
 local DEBUG_FIELD_ORDER = {
     "trigger",
@@ -72,6 +74,7 @@ local DEBUG_FIELD_ORDER = {
     "response_valid",
     "error_envelope",
     "success",
+    "local_success",
     "failed_stage",
     "error_class",
     "changed",
@@ -84,6 +87,7 @@ local DEBUG_FIELD_ORDER = {
     "notes_created",
     "notes_updated",
     "notes_deleted",
+    "sync_enqueued",
     "interval_seconds",
     "attempt",
 }
@@ -767,13 +771,14 @@ function Goodreads:pollAnnotationResult(snapshot)
         attempts = attempts + 1
         local result = readKeyValueFile(ANNOTATION_RESULT_FILE, ANNOTATION_RESULT_KEYS)
         if result and result.asin == asin and result.request_id == request_id then
-            local success = result.success == "true"
+            local success = result.success == "true" and result.sync_enqueued == "true"
             self:debugLog("annotations_sync_result", {
                 trigger = trigger,
                 asin = asin,
                 annotations = result.requested,
                 status = success and "accepted" or "failed",
                 success = success,
+                local_success = result.local_success,
                 failed_stage = result.failed_stage,
                 error_class = result.error_class,
                 highlights_created = result.highlights_created,
@@ -781,6 +786,7 @@ function Goodreads:pollAnnotationResult(snapshot)
                 notes_created = result.notes_created,
                 notes_updated = result.notes_updated,
                 notes_deleted = result.notes_deleted,
+                sync_enqueued = result.sync_enqueued,
             })
             self.last_annotation_sync_result = result
             self:finishAnnotationReconcile(
@@ -1763,8 +1769,10 @@ function Goodreads:showDiagnostics()
     if self.last_annotation_sync_result then
         local result = self.last_annotation_sync_result
         table.insert(lines, string.format(
-            _("Latest annotation sync: %s; %s highlight(s) created, %s note(s) created, %s note(s) updated"),
-            result.success == "true" and _("accepted") or _("failed"),
+            _("Latest annotation sync: %s; native queue %s; %s highlight(s) created, %s note(s) created, %s note(s) updated"),
+            result.success == "true" and result.sync_enqueued == "true"
+                and _("accepted") or _("failed"),
+            result.sync_enqueued == "true" and _("accepted") or _("not queued"),
             result.highlights_created or "0",
             result.notes_created or "0",
             result.notes_updated or "0"

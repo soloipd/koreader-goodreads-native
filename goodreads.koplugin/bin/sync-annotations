@@ -14,6 +14,9 @@ STATE_DIR="/mnt/us/koreader/settings/goodreads_native_annotations"
 LOCK_DIR="/tmp/goodreads-annotation-sync.lock"
 PUBLISHED_RESULT="/tmp/goodreads-annotation-result.log"
 ATTACH_LOG="/tmp/goodreads-annotation-attach.log"
+ANNOTATION_CONTROLLER="com.lab126.KPPAnnotationController"
+ANNOTATION_ENQUEUE_PROPERTY="KSDKAnnotationsEnqueueForSync"
+LIPC_SET_PROP="/usr/bin/lipc-set-prop"
 lock_acquired=0
 state_temp=""
 request_result=""
@@ -138,6 +141,31 @@ if ! grep -Fqx "asin=$asin" "$request_result" \
     exit 7
 fi
 
+enqueue_ok=0
+if grep -Fqx 'success=true' "$request_result"; then
+    # ReaderSDK mutations update the native annotation store. Explicitly hand
+    # that store to Amazon's annotation sync client as the native reader does;
+    # otherwise a direct agent mutation may remain local indefinitely.
+    normalized_result="$request_result.normalized"
+    if ! grep -v '^success=' "$request_result" >"$normalized_result"; then
+        exit 8
+    fi
+    if [ -x "$LIPC_SET_PROP" ] \
+        && "$LIPC_SET_PROP" "$ANNOTATION_CONTROLLER" "$ANNOTATION_ENQUEUE_PROPERTY" koreader \
+            >/dev/null 2>&1; then
+        printf '%s\n' 'local_success=true' 'sync_enqueued=true' 'success=true' \
+            >>"$normalized_result"
+        enqueue_ok=1
+    else
+        printf '%s\n' 'local_success=true' 'sync_enqueued=false' 'success=false' \
+            'failed_stage=native_sync_enqueue' >>"$normalized_result"
+    fi
+    if ! mv -f "$normalized_result" "$request_result"; then
+        rm -f "$normalized_result"
+        exit 8
+    fi
+fi
+
 published_temp="$PUBLISHED_RESULT.$$"
 if ! cp "$request_result" "$published_temp" || ! mv -f "$published_temp" "$PUBLISHED_RESULT"; then
     rm -f "$published_temp"
@@ -146,6 +174,9 @@ fi
 
 if ! grep -Fqx 'success=true' "$request_result"; then
     exit 7
+fi
+if [ "$enqueue_ok" -ne 1 ]; then
+    exit 10
 fi
 
 if ! mv -f "$state_temp" "$state_file"; then
