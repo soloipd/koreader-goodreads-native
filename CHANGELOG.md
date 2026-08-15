@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-08-15
+
+### Added
+
+- Native Goodreads rating updates through `com.lab126.grokservice` and its
+  authenticated `rateABook` hash property.
+- A one-time 1–5 star chooser after book completion, with no inferred rating.
+- Manual actions to rate the current or last completed ASIN-backed book.
+- Rating removal through the native zero-rating operation.
+- Persistent prompt suppression and local display of the last submitted
+  rating per ASIN.
+
 ## [0.1.3] - 2026-08-15
 
 ### Fixed

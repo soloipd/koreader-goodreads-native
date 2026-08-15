@@ -1,8 +1,8 @@
 # Goodreads Native Sync for KOReader on Kindle
 
-An experimental KOReader plugin for jailbroken Kindles that silently syncs
-Goodreads shelf state **and reading percentage** through the Kindle's existing
-Amazon/Goodreads session.
+An experimental KOReader plugin for jailbroken Kindles that syncs Goodreads
+shelf state, **reading percentage, and explicit star ratings** through the
+Kindle's existing Amazon/Goodreads session.
 
 No Goodreads API key, Goodreads password, Amazon cookie, or manually supplied
 account token is required or stored.
@@ -17,6 +17,8 @@ account token is required or stored.
 - Puts a book on `Currently Reading` after KOReader records progress.
 - Marks a book `Read` when KOReader completes it or reaches 99%.
 - Silently sends the rounded whole-number percentage to Goodreads on close.
+- Offers a one-time 1–5 star chooser when a book is completed.
+- Supports manual rating updates and clearing an existing rating.
 - Suppresses duplicate percentage updates per ASIN.
 - Keeps shelf and percentage synchronization independently configurable.
 - Uses only the Kindle's native authenticated services.
@@ -50,7 +52,8 @@ Compatibility reports are welcome.
 
 3. Restart KOReader once.
 4. Open **Main menu → Tools → More tools → Goodreads (native Kindle sync)**.
-5. Leave **Automatic shelf sync** and **Silent percentage sync** enabled.
+5. Leave **Automatic shelf sync**, **Silent percentage sync**, and
+   **Prompt to rate completed books** enabled.
 
 For an SSH installation from the repository checkout:
 
@@ -91,6 +94,14 @@ would otherwise be ambiguous.
 The saved value contains no account information and exists only to prevent an
 unchanged percentage from being sent repeatedly.
 
+When the book is complete, KOReader displays a one-time rating chooser after
+returning to the file browser. The chosen 1–5 star value is submitted through
+the Kindle's native `rateABook` service. Rating `0` is exposed as **Clear
+rating**. The plugin never guesses a rating from reading behavior.
+
+You can also use **Rate current book…** while reading or **Rate last completed
+book…** from the file browser.
+
 See [Architecture](docs/architecture.md) and
 [Kindle native-service notes](docs/reverse-engineering-notes.md) for details.
 
@@ -125,6 +136,9 @@ Common failure points:
 The native Kindle Goodreads UI should work with the same account before this
 plugin is expected to work.
 
+Rating failures are shown immediately in KOReader. A successful rating is also
+remembered locally so the completion prompt is not repeated for the same ASIN.
+
 ## Build and verify
 
 With JDK 8 or newer, Lua 5.1/LuaJIT, ZIP, and optionally ShellCheck:
@@ -151,6 +165,8 @@ framework logs in public issues.
 ## Limitations
 
 - Goodreads receives integer percentages, matching Amazon's native request.
+- Goodreads ratings are whole stars from 1–5; half-star ratings are not
+  supported by the native service.
 - Progress is sent from KOReader to Goodreads; this plugin does not download a
   Goodreads percentage into KOReader.
 - Only ASIN-backed books are supported.
