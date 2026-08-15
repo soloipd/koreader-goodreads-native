@@ -1,0 +1,70 @@
+#!/bin/sh
+
+# Submit one explicit Goodreads rating through the Kindle's authenticated Grok
+# service. The request is bounded so a stalled native service cannot freeze
+# KOReader. Only sanitized status fields are written for the Lua UI to poll.
+
+set -u
+
+LIPC_HASH_TOOL="/usr/bin/lipc-hash-prop"
+RESULT_PREFIX="/tmp/goodreads-rating-result"
+
+asin="${1:-}"
+rating="${2:-}"
+request_id="${3:-}"
+
+case "$asin" in
+    B?????????) ;;
+    *) exit 2 ;;
+esac
+
+case "$asin" in
+    *[!A-Z0-9]*) exit 2 ;;
+esac
+
+case "$rating" in
+    0|1|2|3|4|5) ;;
+    *) exit 3 ;;
+esac
+
+case "$request_id" in
+    ''|*[!0-9]*) exit 4 ;;
+esac
+
+result_file="$RESULT_PREFIX-$request_id.log"
+result_tmp="$result_file.$$"
+native_output="/tmp/goodreads-rating-native-$request_id.$$.log"
+payload="{asin = \"$asin\", rating = \"$rating\", updateGoodreads = \"1\", origin = \"reader.eink\"}"
+
+printf '%s\n' "$payload" \
+    | "$LIPC_HASH_TOOL" com.lab126.grokservice rateABook \
+        >"$native_output" 2>&1 &
+native_pid=$!
+
+(
+    sleep 30
+    kill "$native_pid" 2>/dev/null
+) &
+watchdog_pid=$!
+
+wait "$native_pid"
+native_status=$?
+kill "$watchdog_pid" 2>/dev/null
+wait "$watchdog_pid" 2>/dev/null
+
+success=false
+if [ "$native_status" -eq 0 ] \
+    && ! grep -q 'Failed to access' "$native_output" 2>/dev/null; then
+    success=true
+fi
+
+{
+    printf 'asin=%s\n' "$asin"
+    printf 'rating=%s\n' "$rating"
+    printf 'success=%s\n' "$success"
+    printf 'native_exit=%s\n' "$native_status"
+} >"$result_tmp"
+mv "$result_tmp" "$result_file"
+rm -f "$native_output"
+
+[ "$success" = true ]

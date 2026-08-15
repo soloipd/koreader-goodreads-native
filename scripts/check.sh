@@ -7,11 +7,13 @@ plugin_dir="$project_root/goodreads.koplugin"
 agent_jar="$plugin_dir/bin/goodreads-progress-agent-v2.jar"
 
 sh -n "$plugin_dir/bin/sync-progress"
+sh -n "$plugin_dir/bin/sync-rating"
 
 if command -v shellcheck >/dev/null 2>&1; then
     # ShellCheck's informational findings include false positives for the
     # trap-only cleanup function and literal JVM inner-class filenames.
     shellcheck --severity=warning "$plugin_dir/bin/sync-progress" \
+        "$plugin_dir/bin/sync-rating" \
         "$project_root/scripts/build.sh" \
         "$project_root/scripts/check.sh" \
         "$project_root/scripts/package.sh"

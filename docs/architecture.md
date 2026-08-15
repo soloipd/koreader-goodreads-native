@@ -1,7 +1,7 @@
 # Architecture
 
-The plugin uses two independent native Kindle paths because Goodreads shelf
-state and reading percentage are not handled by the same service.
+The plugin uses three native Kindle paths because Goodreads shelf state,
+reading percentage, and ratings are not handled by one service.
 
 ```mermaid
 flowchart LR
@@ -14,6 +14,10 @@ flowchart LR
     G --> H["Authenticated GrokService"]
     H --> I["Goodreads whole-number percentage"]
     I --> J["Persist last successful percent per ASIN"]
+    B --> K["Completion detected"]
+    K --> L["Explicit 1–5 star chooser"]
+    L --> M["Grok rateABook LIPC property"]
+    M --> N["Goodreads rating"]
 ```
 
 ## KOReader hook
@@ -23,6 +27,8 @@ path and progress before the original close handler runs, then queues:
 
 - the shelf action after one second;
 - the percentage helper after three seconds.
+- a one-time rating chooser after returning to the file browser when the book
+  is complete.
 
 Shell-level delays survive a complete KOReader exit and allow other close hooks
 to finish writing the Kindle content database first.
@@ -32,6 +38,17 @@ to finish writing the Kindle content database first.
 The shelf path invokes `lipc-hash-prop` on the Kindle publisher
 `com.lab126.kppkaf`, property `kppAddToGoodreadShelf`. Inputs are selected from
 fixed actions and a strict ASIN allowlist.
+
+## Rating synchronization
+
+Ratings use `lipc-hash-prop` with publisher `com.lab126.grokservice` and
+property `rateABook`. The payload contains a validated ASIN, a whole-number
+rating from 0–5, `updateGoodreads = 1`, and a fixed origin. Rating 0 clears the
+existing rating.
+
+Completion only triggers the chooser. No rating is submitted until the reader
+selects a value. Successful choices are stored in KOReader settings to suppress
+repeat prompts; they can be changed or cleared manually at any time.
 
 ## Percentage synchronization
 
