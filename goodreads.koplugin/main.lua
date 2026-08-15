@@ -320,6 +320,7 @@ end
 function Goodreads:addToMainMenu(menu_items)
     menu_items.goodreads_native = {
         text = _("Goodreads (native Kindle sync)"),
+        sorting_hint = "more_tools",
         sub_item_table = {
             {
                 text = _("Automatic shelf sync"),
