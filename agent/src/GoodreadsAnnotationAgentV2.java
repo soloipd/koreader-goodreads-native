@@ -17,15 +17,13 @@ import java.util.Properties;
 import java.util.Set;
 
 /** Reconciles KOReader highlights with the native Kindle annotation store. */
-public final class GoodreadsAnnotationAgentV1 {
-    private static final String RESULT_PATH = "/tmp/goodreads-annotation-result.log";
-
-    private GoodreadsAnnotationAgentV1() {}
+public final class GoodreadsAnnotationAgentV2 {
+    private GoodreadsAnnotationAgentV2() {}
 
     public static void agentmain(String payloadPath, Instrumentation instrumentation) {
         PrintWriter out;
         try {
-            out = new PrintWriter(new FileWriter(RESULT_PATH, false));
+            out = new PrintWriter(new FileWriter(resultPath(payloadPath), false));
         } catch (Throwable ignored) {
             return;
         }
@@ -37,6 +35,9 @@ public final class GoodreadsAnnotationAgentV1 {
             Properties payload = loadPayload(payloadPath);
             String asin = requireAsin(payload.getProperty("asin"));
             String requestId = requireRequestId(payload.getProperty("request_id"));
+            if (!payloadPath.equals("/tmp/goodreads-annotations-" + requestId + ".properties")) {
+                throw new IllegalArgumentException("request ID does not match payload path");
+            }
             String nativePath = requireNativePath(decodeHex(payload.getProperty("native_path_hex", "")));
             List<Record> desired = readRecords(payload, "desired");
             Map<String, Boolean> previous = readPrevious(payload, "previous");
@@ -167,10 +168,27 @@ public final class GoodreadsAnnotationAgentV1 {
         } finally {
             input.close();
         }
+        // The attached JVM, rather than the launching shell, owns request
+        // deletion. Kindle's AttachLauncher may return before agentmain starts;
+        // deleting from the shell creates a race with this first file open.
+        if (!file.delete() && file.exists()) {
+            throw new IllegalStateException("cannot remove consumed payload");
+        }
         if (!"1".equals(properties.getProperty("version"))) {
             throw new IllegalArgumentException("unsupported payload version");
         }
         return properties;
+    }
+
+    private static String resultPath(String payloadPath) {
+        if (payloadPath == null || !payloadPath.matches("^/tmp/goodreads-annotations-[0-9]+\\.properties$")) {
+            throw new IllegalArgumentException("invalid payload path");
+        }
+        String requestId = payloadPath.substring(
+            "/tmp/goodreads-annotations-".length(),
+            payloadPath.length() - ".properties".length()
+        );
+        return "/tmp/goodreads-annotation-result-" + requestId + ".log";
     }
 
     private static List<Record> readRecords(Properties payload, String prefix) {

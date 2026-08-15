@@ -790,13 +790,13 @@ function Goodreads:pollAnnotationResult(snapshot)
             )
             return
         end
-        if attempts < 30 then
+        if attempts < 120 then
             UIManager:scheduleIn(1, poll)
         else
             self:debugLog("annotations_sync_result", {
                 trigger = trigger,
                 asin = asin,
-                status = "no_result_within_30_seconds",
+                status = "no_result_within_120_seconds",
                 success = false,
             })
             self:finishAnnotationReconcile(snapshot, false, true)

@@ -1,19 +1,22 @@
 #!/bin/sh
 
 # Reconcile one book's KOReader annotations with the native Kindle sidecar.
-# The caller creates a mode-0600 payload in /tmp; this helper always removes it.
+# The attached V2 agent removes the private payload after opening it. This
+# helper only performs bounded fallback cleanup after the agent/result window.
 
 set -u
 
 JAVA_BIN="/usr/java/bin/java"
 PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
-AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v1.jar"
+AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v2.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
 STATE_DIR="/mnt/us/koreader/settings/goodreads_native_annotations"
 LOCK_DIR="/tmp/goodreads-annotation-sync.lock"
-RESULT_FILE="/tmp/goodreads-annotation-result.log"
+PUBLISHED_RESULT="/tmp/goodreads-annotation-result.log"
 ATTACH_LOG="/tmp/goodreads-annotation-attach.log"
 lock_acquired=0
+state_temp=""
+request_result=""
 
 if [ "$#" -ne 1 ]; then
     exit 2
@@ -26,7 +29,15 @@ case "$payload" in
 esac
 
 cleanup() {
+    # AttachLauncher may return before agentmain starts. This is deliberately
+    # reached only after the bounded result wait, never immediately after load.
     rm -f "$payload"
+    if [ -n "$request_result" ]; then
+        rm -f "$request_result"
+    fi
+    if [ -n "$state_temp" ]; then
+        rm -f "$state_temp"
+    fi
     if [ "$lock_acquired" -eq 1 ]; then
         rmdir "$LOCK_DIR" 2>/dev/null || true
     fi
@@ -46,6 +57,7 @@ fi
 case "$request_id" in
     ''|*[!0-9]*) exit 2 ;;
 esac
+request_result="/tmp/goodreads-annotation-result-$request_id.log"
 
 if ! mkdir -p "$STATE_DIR"; then
     exit 4
@@ -62,35 +74,6 @@ framework_pid="$(
 case "$framework_pid" in
     ''|*[!0-9]*) exit 5 ;;
 esac
-
-rm -f "$RESULT_FILE"
-if ! "$JAVA_BIN" --add-modules jdk.attach \
-    -cp "$LAUNCHER_CLASSES" \
-    AttachLauncher "$framework_pid" "$AGENT_JAR" "$payload" \
-    >"$ATTACH_LOG" 2>&1; then
-    exit 6
-fi
-
-# Some Kindle JVM builds acknowledge loadAgent before agentmain has opened its
-# argument file. Keep the private payload alive until the matching result is
-# complete; otherwise the EXIT trap can remove it underneath the agent.
-result_attempt=0
-while [ "$result_attempt" -lt 25 ]; do
-    if [ -f "$RESULT_FILE" ] \
-        && grep -Fqx "asin=$asin" "$RESULT_FILE" \
-        && grep -Fqx "request_id=$request_id" "$RESULT_FILE" \
-        && grep -Eq '^success=(true|false)$' "$RESULT_FILE"; then
-        break
-    fi
-    result_attempt=$((result_attempt + 1))
-    sleep 1
-done
-
-if ! grep -Fqx "asin=$asin" "$RESULT_FILE" \
-    || ! grep -Fqx "request_id=$request_id" "$RESULT_FILE" \
-    || ! grep -Fqx 'success=true' "$RESULT_FILE"; then
-    exit 7
-fi
 
 state_file="$STATE_DIR/$asin"
 state_temp="$state_file.$$"
@@ -113,8 +96,48 @@ if ! awk -F= '
     exit 8
 fi
 chmod 0600 "$state_temp"
+
+rm -f "$request_result"
+if ! "$JAVA_BIN" --add-modules jdk.attach \
+    -cp "$LAUNCHER_CLASSES" \
+    AttachLauncher "$framework_pid" "$AGENT_JAR" "$payload" \
+    >"$ATTACH_LOG" 2>&1; then
+    exit 6
+fi
+
+# Some Kindle JVM builds acknowledge loadAgent before agentmain has opened its
+# argument file. Keep the private payload alive until the matching result is
+# complete; otherwise the EXIT trap can remove it underneath the agent.
+result_attempt=0
+while [ "$result_attempt" -lt 90 ]; do
+    if [ -f "$request_result" ] \
+        && grep -Fqx "asin=$asin" "$request_result" \
+        && grep -Fqx "request_id=$request_id" "$request_result" \
+        && grep -Eq '^success=(true|false)$' "$request_result"; then
+        break
+    fi
+    result_attempt=$((result_attempt + 1))
+    sleep 1
+done
+
+if ! grep -Fqx "asin=$asin" "$request_result" \
+    || ! grep -Fqx "request_id=$request_id" "$request_result"; then
+    exit 7
+fi
+
+published_temp="$PUBLISHED_RESULT.$$"
+if ! cp "$request_result" "$published_temp" || ! mv -f "$published_temp" "$PUBLISHED_RESULT"; then
+    rm -f "$published_temp"
+    exit 8
+fi
+
+if ! grep -Fqx 'success=true' "$request_result"; then
+    exit 7
+fi
+
 if ! mv -f "$state_temp" "$state_file"; then
     exit 8
 fi
+state_temp=""
 
 exit 0

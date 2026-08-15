@@ -91,7 +91,8 @@ KFX anchor, and emits the exact native short and long positions.
 
 The annotation agent opens the explicit native KFX book, reconciles highlight
 and note objects through `AnnotationManager`, and closes the book. A transient
-mode-0600 payload carries note text and is always removed; persistent plugin
+mode-0600 payload carries note text and is removed by the V2 agent immediately
+after loading, with bounded fallback cleanup by the helper; persistent plugin
 state contains coordinate keys only. Diagnostics expose only counts and
 sanitized success/failure stages. Only one native annotation request runs at a
 time. Rapid edits for the same ASIN coalesce to the newest immutable snapshot,

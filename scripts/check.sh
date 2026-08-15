@@ -5,7 +5,7 @@ set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 plugin_dir="$project_root/goodreads.koplugin"
 agent_jar="$plugin_dir/bin/goodreads-progress-agent-v2.jar"
-annotation_agent_jar="$plugin_dir/bin/goodreads-annotation-agent-v1.jar"
+annotation_agent_jar="$plugin_dir/bin/goodreads-annotation-agent-v2.jar"
 
 sh -n "$plugin_dir/bin/sync-progress"
 sh -n "$plugin_dir/bin/sync-rating"
@@ -76,9 +76,9 @@ grep -Fqx 'GoodreadsProgressAgentV2.class' <<<"$progress_entries" \
     || { printf 'error: agent JAR lacks its main class\n' >&2; exit 1; }
 grep -Fqx 'GoodreadsProgressAgentV2$RequestArguments.class' <<<"$progress_entries" \
     || { printf 'error: agent JAR lacks its argument parser class\n' >&2; exit 1; }
-grep -Fqx 'Agent-Class: GoodreadsAnnotationAgentV1' <<<"$annotation_manifest" \
+grep -Fqx 'Agent-Class: GoodreadsAnnotationAgentV2' <<<"$annotation_manifest" \
     || { printf 'error: annotation agent manifest is invalid\n' >&2; exit 1; }
-grep -Fqx 'GoodreadsAnnotationAgentV1.class' <<<"$annotation_entries" \
+grep -Fqx 'GoodreadsAnnotationAgentV2.class' <<<"$annotation_entries" \
     || { printf 'error: annotation agent JAR lacks its main class\n' >&2; exit 1; }
 
 javac_bin="${JAVAC:-javac}"
@@ -93,9 +93,9 @@ if command -v "$javac_bin" >/dev/null 2>&1 && command -v "$java_bin" >/dev/null 
     rm -rf "$annotation_test_dir"
     mkdir -p "$annotation_test_dir"
     "$javac_bin" --release 8 -Xlint:-options -d "$annotation_test_dir" \
-        "$project_root/agent/src/GoodreadsAnnotationAgentV1.java" \
+        "$project_root/agent/src/GoodreadsAnnotationAgentV2.java" \
         "${annotation_test_sources[@]}"
-    "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationAgentV1Test
+    "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationAgentV2Test
 else
     printf 'warning: Java toolchain unavailable; annotation agent behavior tests were skipped\n' >&2
 fi
