@@ -11,9 +11,9 @@ sh -n "$plugin_dir/bin/sync-progress"
 sh -n "$plugin_dir/bin/sync-rating"
 sh -n "$plugin_dir/bin/sync-annotations"
 sh -n "$plugin_dir/bin/watch-pending-annotations"
-sh -n "$project_root/experiments/background-annotation-sync/build.sh"
-sh -n "$project_root/experiments/background-annotation-sync/run-readonly-probe.sh"
-sh -n "$project_root/experiments/background-annotation-sync/run-canary.sh"
+bash -n "$project_root/experiments/background-annotation-sync/build.sh"
+bash -n "$project_root/experiments/background-annotation-sync/run-readonly-probe.sh"
+bash -n "$project_root/experiments/background-annotation-sync/run-canary.sh"
 grep -Fq 'chown "$framework_uid:$framework_gid" "$payload"' "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: annotation payload is not transferred to the framework JVM user\n' >&2; exit 1; }
 grep -Fq 'KSDKAnnotationsEnqueueForSync' "$plugin_dir/bin/sync-annotations" \
