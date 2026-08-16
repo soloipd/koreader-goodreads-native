@@ -1772,7 +1772,11 @@ function Goodreads:syncCapturedCheckpoint(asin, percent, status, trigger, resolv
 
     local shelf_ok = true
     local progress_ok = true
-    if self.settings.enabled then
+    -- The native shelf action changes membership (Currently Reading/Read); it
+    -- is not the percentage transport. Re-publishing the same action at every
+    -- periodic percentage checkpoint keeps waking KPP and, on some firmware,
+    -- can leave KOReader and powerd in an event loop behind the native reader.
+    if self.settings.enabled and trigger ~= "periodic" then
         shelf_ok = self:syncAsin(asin, action, percent, false, trigger)
     end
     if self.settings.percentage_enabled then

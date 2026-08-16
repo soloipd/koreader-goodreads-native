@@ -1,10 +1,13 @@
-.PHONY: build check package clean
+.PHONY: build check stress package clean
 
 build:
 	./scripts/build.sh
 
 check:
 	./scripts/check.sh
+
+stress:
+	./tests/test_lifecycle_stress.sh
 
 package:
 	./scripts/package.sh

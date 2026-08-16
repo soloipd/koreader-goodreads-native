@@ -1,0 +1,41 @@
+#!/bin/sh
+
+# Gracefully close the main KOReader process after a confirmed native-reader
+# handoff. Child helper processes inherit reader.lua's command line, so parent
+# identity and working directory are both verified before signaling anything.
+set -u
+
+PROC_ROOT="${GOODREADS_PROC_ROOT:-/proc}"
+KOREADER_ROOT="${GOODREADS_KOREADER_ROOT:-/mnt/us/koreader}"
+DRY_RUN="${GOODREADS_HANDOFF_DRY_RUN:-0}"
+
+for status in "$PROC_ROOT"/[0-9]*/status; do
+    [ -r "$status" ] || continue
+    process_dir="${status%/status}"
+    pid="${process_dir##*/}"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+
+    name="$(sed -n 's/^Name:[[:space:]]*//p' "$status" | sed -n '1p')"
+    [ "$name" = "reader.lua" ] || continue
+    ppid="$(sed -n 's/^PPid:[[:space:]]*//p' "$status" | sed -n '1p')"
+    case "$ppid" in ''|*[!0-9]*) continue ;; esac
+
+    # Forked KOReader helpers have a reader.lua parent and must not be selected.
+    parent_name="$(sed -n 's/^Name:[[:space:]]*//p' \
+        "$PROC_ROOT/$ppid/status" 2>/dev/null | sed -n '1p')"
+    [ "$parent_name" != "reader.lua" ] || continue
+
+    cwd="$(readlink "$process_dir/cwd" 2>/dev/null || true)"
+    [ "$cwd" = "$KOREADER_ROOT" ] || continue
+    command_line="$(tr '\000' ' ' <"$process_dir/cmdline" 2>/dev/null || true)"
+    case "$command_line" in *reader.lua*) ;; *) continue ;; esac
+
+    if [ "$DRY_RUN" = "1" ]; then
+        printf '%s\n' "$pid"
+        exit 0
+    fi
+    kill -TERM "$pid"
+    exit $?
+done
+
+exit 1

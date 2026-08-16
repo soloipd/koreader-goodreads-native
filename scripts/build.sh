@@ -47,6 +47,7 @@ chmod 0755 "$project_root/goodreads.koplugin/bin/sync-progress" \
     "$project_root/goodreads.koplugin/bin/export-native-annotations" \
     "$project_root/goodreads.koplugin/bin/capture-native-annotations" \
     "$project_root/goodreads.koplugin/bin/watch-native-annotations" \
+    "$project_root/goodreads.koplugin/bin/exit-koreader-after-native-handoff" \
     "$project_root/goodreads.koplugin/bin/watch-pending-annotations" \
     "$project_root/goodreads.koplugin/bin/manage-sync-receipts" \
     "$project_root/goodreads.koplugin/bin/acknowledge-annotation-outbox"

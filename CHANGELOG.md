@@ -3,6 +3,21 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.1] - 2026-08-17
+
+### Fixed
+
+- After a confirmed native-reader annotation capture, the watcher now asks the
+  main KOReader process to exit through its normal `SIGTERM` shutdown path.
+  This prevents a Kindle firmware power-event/D-Bus loop when KOReader remains
+  alive behind KPP; child helpers are excluded and no force-kill is used.
+- Periodic percentage checkpoints no longer republish an unchanged native
+  Goodreads shelf action. Shelf state still syncs on reader lifecycle and
+  manual checkpoints, while periodic ticks use only the percentage transport.
+- CI and tagged releases now require lifecycle stress tests covering 1,000
+  handoffs, 50 concurrent watcher starts, 1,000 forked helper candidates, and
+  1,000 periodic checkpoints.
+
 ## [0.7.0] - 2026-08-16
 
 ### Added
