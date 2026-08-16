@@ -55,6 +55,8 @@ local ANNOTATION_RESULT_KEYS = {
     local_verified = true,
     native_notified = true,
     ksdk_synced = true,
+    legacy_journaled = true,
+    native_cloud_queued = true,
     cloud_synced = true,
     cloud_snapshot_synced = true,
     success = true,
@@ -67,9 +69,12 @@ local ANNOTATION_RESULT_KEYS = {
     notes_deleted = true,
     native_notifications = true,
     zero_endpoint_repairs = true,
+    terminal_endpoint_repairs = true,
     cloud_edits = true,
     cloud_snapshots = true,
     ksdk_writes = true,
+    native_journal_edits = true,
+    native_upload_requests = true,
     legacy_cloud_deletes = true,
     book_source = true,
     sync_enqueued = true,
@@ -90,6 +95,8 @@ local DEBUG_FIELD_ORDER = {
     "local_verified",
     "native_notified",
     "ksdk_synced",
+    "legacy_journaled",
+    "native_cloud_queued",
     "cloud_synced",
     "cloud_snapshot_synced",
     "failed_stage",
@@ -106,9 +113,12 @@ local DEBUG_FIELD_ORDER = {
     "notes_deleted",
     "native_notifications",
     "zero_endpoint_repairs",
+    "terminal_endpoint_repairs",
     "cloud_edits",
     "cloud_snapshots",
     "ksdk_writes",
+    "native_journal_edits",
+    "native_upload_requests",
     "legacy_cloud_deletes",
     "book_source",
     "sync_enqueued",
@@ -807,8 +817,11 @@ function Goodreads:pollAnnotationResult(snapshot)
                 and result.local_verified == "true"
                 and result.native_notified == "true"
                 and (result.ksdk_synced == "true" or result.ksdk_synced == "unavailable")
-                and result.cloud_synced == "true"
-                and result.cloud_snapshot_synced == "true"
+                and (result.legacy_journaled == "true"
+                    or result.legacy_journaled == "unavailable")
+                and result.native_cloud_queued == "true"
+                and (result.cloud_snapshot_synced == "true"
+                    or result.cloud_snapshot_synced == "unavailable")
                 and result.sync_enqueued == "true"
             self:debugLog("annotations_sync_result", {
                 trigger = trigger,
@@ -820,6 +833,8 @@ function Goodreads:pollAnnotationResult(snapshot)
                 local_verified = result.local_verified,
                 native_notified = result.native_notified,
                 ksdk_synced = result.ksdk_synced,
+                legacy_journaled = result.legacy_journaled,
+                native_cloud_queued = result.native_cloud_queued,
                 cloud_synced = result.cloud_synced,
                 cloud_snapshot_synced = result.cloud_snapshot_synced,
                 failed_stage = result.failed_stage,
@@ -831,9 +846,12 @@ function Goodreads:pollAnnotationResult(snapshot)
                 notes_deleted = result.notes_deleted,
                 native_notifications = result.native_notifications,
                 zero_endpoint_repairs = result.zero_endpoint_repairs,
+                terminal_endpoint_repairs = result.terminal_endpoint_repairs,
                 cloud_edits = result.cloud_edits,
                 cloud_snapshots = result.cloud_snapshots,
                 ksdk_writes = result.ksdk_writes,
+                native_journal_edits = result.native_journal_edits,
+                native_upload_requests = result.native_upload_requests,
                 legacy_cloud_deletes = result.legacy_cloud_deletes,
                 book_source = result.book_source,
                 sync_enqueued = result.sync_enqueued,
@@ -1818,18 +1836,26 @@ function Goodreads:showDiagnostics()
     end
     if self.last_annotation_sync_result then
         local result = self.last_annotation_sync_result
+        local journal_ok = result.ksdk_synced == "true"
+            or result.legacy_journaled == "true"
+        local snapshot_ok = result.cloud_snapshot_synced == "true"
+            or result.cloud_snapshot_synced == "unavailable"
         table.insert(lines, string.format(
-            _("Latest annotation sync: %s; local readback %s; KPP/KSDK bridge %s; WhisperStore %s; native queue %s; %s highlight(s) created, %s note(s) created, %s note(s) updated"),
+            _("Latest annotation sync: %s; local readback %s; KPP notification %s; native journal %s; upload request %s; system queue %s; %s highlight(s) created, %s note(s) created, %s note(s) updated"),
             result.success == "true" and result.local_verified == "true"
                 and result.native_notified == "true"
                 and (result.ksdk_synced == "true" or result.ksdk_synced == "unavailable")
-                and result.cloud_synced == "true"
-                and result.cloud_snapshot_synced == "true"
+                and (result.legacy_journaled == "true"
+                    or result.legacy_journaled == "unavailable")
+                and journal_ok
+                and result.native_cloud_queued == "true"
+                and snapshot_ok
                 and result.sync_enqueued == "true"
                 and _("accepted") or _("failed"),
             result.local_verified == "true" and _("verified") or _("not verified"),
             result.native_notified == "true" and _("notified") or _("not notified"),
-            result.cloud_synced == "true" and _("accepted") or _("rejected"),
+            journal_ok and _("written") or _("not written"),
+            result.native_cloud_queued == "true" and _("requested") or _("not requested"),
             result.sync_enqueued == "true" and _("accepted") or _("not queued"),
             result.highlights_created or "0",
             result.notes_created or "0",

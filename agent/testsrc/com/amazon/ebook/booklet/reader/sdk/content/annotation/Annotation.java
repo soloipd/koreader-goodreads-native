@@ -7,4 +7,6 @@ public interface Annotation {
     Object Cf();
     Object L();
     Object Cd();
+    AnnotationExport Ci();
+    JournalType CS();
 }

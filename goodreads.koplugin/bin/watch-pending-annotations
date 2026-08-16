@@ -1,0 +1,51 @@
+#!/bin/sh
+
+# Replay coalesced annotation snapshots when Kindle's native reader starts.
+# One watcher serves every pending ASIN and exits when the queue is empty.
+
+set -u
+
+PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
+SYNC_HELPER="$PLUGIN_DIR/bin/sync-annotations"
+PENDING_DIR="/mnt/us/koreader/settings/goodreads_native_annotations_pending"
+WATCH_LOCK="/tmp/goodreads-annotation-watcher.lock"
+LIPC_WAIT_EVENT="/usr/bin/lipc-wait-event"
+
+if ! mkdir "$WATCH_LOCK" 2>/dev/null; then
+    exit 0
+fi
+trap 'rmdir "$WATCH_LOCK" 2>/dev/null || true' EXIT HUP INT TERM
+
+replay_pending() {
+    found=0
+    for pending in "$PENDING_DIR"/B?????????; do
+        [ -f "$pending" ] || continue
+        found=1
+        request_id="$(date +%s)$$"
+        payload="/tmp/goodreads-annotations-$request_id.properties"
+        if ! awk -F= -v id="$request_id" '
+            /^request_id=/ { print "request_id=" id; next }
+            { print }
+        ' "$pending" >"$payload"; then
+            rm -f "$payload"
+            continue
+        fi
+        chmod 0600 "$payload"
+        if "$SYNC_HELPER" "$payload"; then
+            rm -f "$pending"
+        fi
+    done
+    return "$found"
+}
+
+# A pending snapshot may have been queued while the native book was already
+# activating, so try once before blocking for the next application start.
+replay_pending || true
+
+while find "$PENDING_DIR" -maxdepth 1 -type f -name 'B?????????' 2>/dev/null \
+    | grep -q .; do
+    "$LIPC_WAIT_EVENT" com.lab126.appmgrd appStarted >/dev/null 2>&1 || exit 0
+    replay_pending || true
+done
+
+exit 0

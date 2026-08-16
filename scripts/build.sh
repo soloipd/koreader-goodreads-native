@@ -7,7 +7,7 @@ source_dir="$project_root/agent/src"
 build_dir="$project_root/agent/build/jdk"
 classes_dir="$build_dir/classes"
 agent_jar="$project_root/goodreads.koplugin/bin/goodreads-progress-agent-v2.jar"
-annotation_agent_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-agent-v15.jar"
+annotation_agent_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-agent-v26.jar"
 launcher_class="$project_root/goodreads.koplugin/bin/classes/AttachLauncher.class"
 
 javac_bin="${JAVAC:-javac}"
@@ -22,22 +22,23 @@ find "$(dirname "$annotation_agent_jar")" -maxdepth 1 -type f \
 "$javac_bin" --release 8 -d "$classes_dir" \
     "$source_dir/AttachLauncher.java" \
     "$source_dir/GoodreadsProgressAgentV2.java" \
-    "$source_dir/GoodreadsAnnotationAgentV15.java"
+    "$source_dir/GoodreadsAnnotationAgentV26.java"
 
 "$jar_bin" cfm "$agent_jar" "$project_root/agent/manifest-progress.mf" \
     -C "$classes_dir" GoodreadsProgressAgentV2.class \
     -C "$classes_dir" 'GoodreadsProgressAgentV2$RequestArguments.class'
 
 "$jar_bin" cfm "$annotation_agent_jar" "$project_root/agent/manifest-annotations.mf" \
-    -C "$classes_dir" GoodreadsAnnotationAgentV15.class \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV15$CloudAnnotationHandler.class' \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV15$Record.class' \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV15$Counters.class'
+    -C "$classes_dir" GoodreadsAnnotationAgentV26.class \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV26$CloudAnnotationHandler.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV26$Record.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV26$Counters.class'
 
 cp "$classes_dir/AttachLauncher.class" "$launcher_class"
 chmod 0644 "$agent_jar" "$annotation_agent_jar" "$launcher_class"
 chmod 0755 "$project_root/goodreads.koplugin/bin/sync-progress" \
-    "$project_root/goodreads.koplugin/bin/sync-annotations"
+    "$project_root/goodreads.koplugin/bin/sync-annotations" \
+    "$project_root/goodreads.koplugin/bin/watch-pending-annotations"
 
 printf 'Built %s\n' "$agent_jar"
 printf 'Built %s\n' "$annotation_agent_jar"
