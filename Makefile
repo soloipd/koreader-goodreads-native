@@ -7,7 +7,7 @@ check:
 	./scripts/check.sh
 
 stress:
-	./tests/test_lifecycle_stress.sh
+	./tests/test_release_stress.sh
 
 package:
 	./scripts/package.sh

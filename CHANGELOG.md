@@ -3,6 +3,35 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-08-16
+
+### Added
+
+- Component-level native annotation provenance in KOReader metadata. A newly
+  imported highlight records native range ownership, while a native note added
+  to an existing KOReader highlight owns only that note component.
+- Safe native-to-KOReader reconciliation for native note edits, note removal,
+  and highlight deletion from complete native snapshots.
+- Durable, text-free native-range tombstones prevent a stale native snapshot
+  from recreating a highlight that was just deleted in KOReader. They clear
+  only after a complete native snapshot confirms the deletion.
+
+### Safety
+
+- A native deletion removes a native-created KOReader highlight only while its
+  imported note and style remain unchanged. A local note edit wins over stale
+  native snapshots and protects the highlight until Kindle echoes the same edit;
+  that exact echo safely rebases ownership. A local style edit detaches it.
+- A native deletion can remove an unchanged imported note from a pre-existing
+  KOReader highlight, but can never delete that highlight.
+- Ambiguous v0.7 import markers migrate by preserving the annotation and
+  discarding the marker; this release never guesses historical ownership.
+- Failed KOReader persistence events retain and replay the private snapshot.
+  Annotation text remains confined to Kindle's native store and KOReader's own
+  private annotation metadata and never enters diagnostics or receipts.
+- The release gate stress-tests a maximum-size 1,000-annotation import and mass
+  deletion with 500 local conflicts that must all survive.
+
 ## [0.7.1] - 2026-08-17
 
 ### Fixed

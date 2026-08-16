@@ -34,6 +34,7 @@ case "$native_path_hex" in ''|*[!0-9a-f]*) exit 5 ;; esac
 case "$count" in ''|*[!0-9]*) exit 5 ;; esac
 [ "$count" -le 1000 ] || exit 5
 grep -Fqx 'success=true' "$result" || exit 5
+grep -Fqx 'snapshot_complete=true' "$result" || exit 5
 
 mkdir -p "$INBOX_DIR" || exit 6
 chmod 0700 "$PRIVATE_STATE_DIR" "$INBOX_DIR" 2>/dev/null || true

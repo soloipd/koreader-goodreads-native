@@ -391,11 +391,13 @@ local import_reader = {
 }
 local import_snapshot = {
     path = import_snapshot_path,
+    asin = "B0FLB24198",
+    snapshot_complete = true,
     items = {
-        { note = "native fills empty" },
-        { note = "native conflict" },
-        { note = "" },
-        { note = "native new note" },
+        { start_long = "AAAAAAAAAAA1", end_long = "AAAAAAAAAAA2", note = "native fills empty" },
+        { start_long = "AAAAAAAAAAA3", end_long = "AAAAAAAAAAA4", note = "native conflict" },
+        { start_long = "AAAAAAAAAAA5", end_long = "AAAAAAAAAAA6", note = "" },
+        { start_long = "AAAAAAAAAAA7", end_long = "AAAAAAAAAAA8", note = "native new note" },
     },
 }
 local import_positions = {
@@ -413,12 +415,290 @@ assert(imported_annotations[3].drawer == "underscore", "import should inherit th
 assert(imported_annotations[4].note == "native new note", "new native note should be retained")
 assert(imported_event and imported_event.name == "AnnotationsModified",
     "native import must emit KOReader's persistence event")
-assert(imported_event.args.nb_highlights_added == 2,
-    "native import event must count newly added highlights")
+assert(imported_event.args.nb_highlights_added == nil,
+    "one filled note and one plain added highlight must have zero net highlight delta")
 assert(imported_event.args.nb_notes_added == 2,
     "native import event must count new and filled notes")
+assert(empty_note.goodreads_native_provenance.highlight_created == false
+    and empty_note.goodreads_native_provenance.note_imported == true,
+    "an imported note on an existing highlight must own only the note")
+assert(conflict.goodreads_native_provenance == nil,
+    "a conflicting KOReader note must never acquire native ownership")
+assert(imported_annotations[3].goodreads_native_provenance.highlight_created == true,
+    "a newly imported range must record native highlight ownership")
 assert(io.open(import_snapshot_path, "r") == nil,
     "native snapshot must be acknowledged after the persistence event")
+
+-- Component-level provenance makes native deletions safe. A native-created
+-- highlight may be removed only while its range, note, and style remain at the
+-- imported baseline. Existing KOReader highlights can own an imported note
+-- without giving native sync ownership of the highlight itself.
+local import_case_sequence = 0
+local function newImportReader(initial)
+    local annotations = initial or {}
+    local events = {}
+    return {
+        annotation = {
+            annotations = annotations,
+            addItem = function(_, item)
+                table.insert(annotations, item)
+                return #annotations
+            end,
+        },
+        document = {
+            virtual_path = "KINDLE_VIRTUAL://B0FLB24198/book.epub",
+            getTextFromXPointers = function(_, first, second)
+                return first .. second
+            end,
+        },
+        view = { highlight = { saved_drawer = "lighten" } },
+        toc = { getTocTitleByPage = function() return nil end },
+        events = events,
+        handleEvent = function(_, event) table.insert(events, event) end,
+    }, annotations
+end
+
+local function completeNativeSnapshot(plugin_, reader_, specs, fixed_path)
+    import_case_sequence = import_case_sequence + 1
+    local path = fixed_path
+        or ("/tmp/goodreads-native-provenance-test-" .. import_case_sequence)
+    local file = assert(io.open(path, "w"))
+    file:write("private test snapshot")
+    file:close()
+    local items, translated = {}, {}
+    for _, spec in ipairs(specs) do
+        table.insert(items, {
+            start_long = string.format("A%011d", spec.id * 2 - 1),
+            end_long = string.format("A%011d", spec.id * 2),
+            note = spec.note or "",
+        })
+        table.insert(translated, {
+            start = { xpointer = spec.pos0 },
+            ["end"] = { xpointer = spec.pos1 },
+        })
+    end
+    local ok_, detail_ = plugin_:applyNativeAnnotationImport(reader_, {
+        path = path,
+        asin = "B0FLB24198",
+        snapshot_complete = true,
+        items = items,
+    }, translated)
+    return ok_, detail_, path
+end
+
+local owned_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
+local owned_reader, owned = newImportReader()
+assert(completeNativeSnapshot(owned_plugin, owned_reader, {
+    { id = 1, pos0 = "/owned.1", pos1 = "/owned.2", note = "native first" },
+}))
+assert(#owned == 1 and owned[1].goodreads_native_provenance.highlight_created,
+    "new native highlight must record highlight ownership")
+assert(owned[1].goodreads_native_provenance.note_value == "native first",
+    "native note baseline must stay private in KOReader metadata")
+
+owned_reader.events = {}
+owned_reader.handleEvent = function(_, event) table.insert(owned_reader.events, event) end
+assert(completeNativeSnapshot(owned_plugin, owned_reader, {
+    { id = 1, pos0 = "/owned.1", pos1 = "/owned.2", note = "native edited" },
+}))
+assert(owned[1].note == "native edited", "unchanged imported note must accept a native edit")
+assert(#owned_reader.events == 1, "native note edit must persist exactly once")
+
+owned_reader.events = {}
+assert(completeNativeSnapshot(owned_plugin, owned_reader, {
+    { id = 1, pos0 = "/owned.1", pos1 = "/owned.2", note = "" },
+}))
+assert(owned[1].note == nil, "native note removal must remove an unchanged imported note")
+assert(owned_reader.events[1].args.nb_highlights_added == 1
+    and owned_reader.events[1].args.nb_notes_added == -1,
+    "note removal must report KOReader's note-to-highlight type transition")
+
+owned_reader.events = {}
+assert(completeNativeSnapshot(owned_plugin, owned_reader, {}))
+assert(#owned == 0, "unchanged native-owned highlight must follow native deletion")
+assert(owned_reader.events[1].args.nb_highlights_added == -1,
+    "native highlight deletion must report the removal delta")
+
+local existing_item = {
+    drawer = "lighten", pos0 = "/existing.1", pos1 = "/existing.2", note = "",
+}
+local existing_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
+local existing_reader, existing_annotations = newImportReader({ existing_item })
+assert(completeNativeSnapshot(existing_plugin, existing_reader, {
+    { id = 2, pos0 = "/existing.1", pos1 = "/existing.2", note = "native-only note" },
+}))
+assert(existing_item.goodreads_native_provenance.highlight_created == false,
+    "pre-existing KOReader range must never become native-owned")
+existing_reader.events = {}
+existing_reader.handleEvent = function(_, event) table.insert(existing_reader.events, event) end
+assert(completeNativeSnapshot(existing_plugin, existing_reader, {}))
+assert(#existing_annotations == 1 and existing_item.note == nil,
+    "native deletion may remove its note but must preserve a KOReader highlight")
+assert(existing_item.goodreads_native_provenance == nil,
+    "removed native note must detach its component provenance")
+
+local local_note_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
+local local_note_reader, local_note_annotations = newImportReader()
+assert(completeNativeSnapshot(local_note_plugin, local_note_reader, {
+    { id = 3, pos0 = "/local-note.1", pos1 = "/local-note.2", note = "native baseline" },
+}))
+local_note_annotations[1].note = "locally edited"
+assert(completeNativeSnapshot(local_note_plugin, local_note_reader, {}))
+assert(#local_note_annotations == 1 and local_note_annotations[1].note == "locally edited",
+    "local note edit must protect the entire annotation from native deletion")
+assert(local_note_annotations[1].goodreads_native_provenance == nil,
+    "local note edit must detach native ownership")
+
+local removed_note_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
+local removed_note_reader, removed_note_annotations = newImportReader()
+local removed_note_spec = {
+    { id = 7, pos0 = "/removed-note.1", pos1 = "/removed-note.2", note = "native baseline" },
+}
+assert(completeNativeSnapshot(removed_note_plugin, removed_note_reader, removed_note_spec))
+removed_note_annotations[1].note = nil
+assert(completeNativeSnapshot(removed_note_plugin, removed_note_reader, removed_note_spec))
+assert(#removed_note_annotations == 1 and removed_note_annotations[1].note == nil,
+    "local note removal must not be immediately re-imported from a stale native snapshot")
+assert(removed_note_annotations[1].goodreads_native_provenance.note_value
+    == "native baseline",
+    "stale native snapshot must retain the pre-edit baseline until Kindle echoes the edit")
+local removed_note_echo = {
+    { id = 7, pos0 = "/removed-note.1", pos1 = "/removed-note.2", note = "" },
+}
+assert(completeNativeSnapshot(removed_note_plugin, removed_note_reader, removed_note_echo))
+assert(removed_note_annotations[1].goodreads_native_provenance.note_value == "",
+    "matching native echo must rebase the locally removed note")
+assert(completeNativeSnapshot(removed_note_plugin, removed_note_reader, {}))
+assert(#removed_note_annotations == 0,
+    "after native echo convergence, a later native highlight deletion must propagate")
+
+local tombstone_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
+local tombstone_reader, tombstone_annotations = newImportReader()
+tombstone_plugin.ui = tombstone_reader
+local tombstone_spec = {
+    { id = 8, pos0 = "/tombstone.1", pos1 = "/tombstone.2", note = "stale native" },
+}
+assert(completeNativeSnapshot(tombstone_plugin, tombstone_reader, tombstone_spec))
+local locally_deleted = table.remove(tombstone_annotations, 1)
+local deletion_event = { locally_deleted, index_modified = -1 }
+tombstone_plugin:onAnnotationsModified(deletion_event)
+local tombstone_key = locally_deleted.goodreads_native_provenance.key
+assert(tombstone_plugin.settings.native_annotation_tombstones.B0FLB24198[tombstone_key],
+    "local deletion must persist a coordinate-only native tombstone")
+assert(completeNativeSnapshot(tombstone_plugin, tombstone_reader, tombstone_spec))
+assert(#tombstone_annotations == 0,
+    "stale native snapshot must not recreate a locally deleted highlight")
+assert(tombstone_plugin.settings.native_annotation_tombstones.B0FLB24198[tombstone_key],
+    "tombstone must remain until native deletion is observed")
+
+local incomplete_path = "/tmp/goodreads-native-incomplete-test"
+local incomplete_file = assert(io.open(incomplete_path, "w"))
+incomplete_file:write("incomplete test snapshot")
+incomplete_file:close()
+assert(tombstone_plugin:applyNativeAnnotationImport(tombstone_reader, {
+    path = incomplete_path,
+    asin = "B0FLB24198",
+    snapshot_complete = false,
+    items = {},
+}, {}))
+assert(tombstone_plugin.settings.native_annotation_tombstones.B0FLB24198[tombstone_key],
+    "incomplete snapshot must not acknowledge a deletion tombstone")
+assert(completeNativeSnapshot(tombstone_plugin, tombstone_reader, {}))
+assert(tombstone_plugin.settings.native_annotation_tombstones.B0FLB24198 == nil,
+    "complete native snapshot without the key must acknowledge the tombstone")
+
+local style_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
+local style_reader, style_annotations = newImportReader()
+assert(completeNativeSnapshot(style_plugin, style_reader, {
+    { id = 4, pos0 = "/style.1", pos1 = "/style.2", note = "native style note" },
+}))
+style_annotations[1].drawer = "underscore"
+assert(completeNativeSnapshot(style_plugin, style_reader, {}))
+assert(#style_annotations == 1 and style_annotations[1].drawer == "underscore",
+    "local style edit must preserve the highlight on native deletion")
+assert(style_annotations[1].note == nil,
+    "native deletion may still remove its unchanged imported note component")
+
+local legacy_item = {
+    drawer = "lighten", pos0 = "/legacy.1", pos1 = "/legacy.2",
+    goodreads_native_import = true,
+}
+local legacy_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
+local legacy_reader, legacy_annotations = newImportReader({ legacy_item })
+assert(completeNativeSnapshot(legacy_plugin, legacy_reader, {}))
+assert(#legacy_annotations == 1 and legacy_item.goodreads_native_import == nil,
+    "ambiguous v0.7 ownership must migrate by preserving and detaching")
+
+local idempotent_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
+local idempotent_reader, idempotent_annotations = newImportReader()
+local idempotent_spec = {
+    { id = 5, pos0 = "/idempotent.1", pos1 = "/idempotent.2", note = "same" },
+}
+assert(completeNativeSnapshot(idempotent_plugin, idempotent_reader, idempotent_spec))
+idempotent_reader.events = {}
+idempotent_reader.handleEvent = function(_, event) table.insert(idempotent_reader.events, event) end
+assert(completeNativeSnapshot(idempotent_plugin, idempotent_reader, idempotent_spec))
+assert(#idempotent_annotations == 1 and #idempotent_reader.events == 0,
+    "replaying an identical complete snapshot must be idempotent")
+
+local retry_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
+local retry_reader, retry_annotations = newImportReader()
+local retry_path = "/tmp/goodreads-native-provenance-retry"
+retry_reader.handleEvent = function() error("injected persistence failure") end
+local retry_ok = completeNativeSnapshot(retry_plugin, retry_reader, {
+    { id = 6, pos0 = "/retry.1", pos1 = "/retry.2", note = "retry" },
+}, retry_path)
+assert(not retry_ok and io.open(retry_path, "r") ~= nil,
+    "failed KOReader persistence event must retain the native snapshot")
+retry_reader.events = {}
+retry_reader.handleEvent = function(_, event) table.insert(retry_reader.events, event) end
+assert(completeNativeSnapshot(retry_plugin, retry_reader, {
+    { id = 6, pos0 = "/retry.1", pos1 = "/retry.2", note = "retry" },
+}, retry_path))
+assert(#retry_annotations == 1 and #retry_reader.events == 1,
+    "retry must re-emit the failed persistence event without duplicating data")
+assert(io.open(retry_path, "r") == nil,
+    "snapshot may be acknowledged only after persistence retry succeeds")
+
+-- Exercise the full per-book import limit in one complete snapshot, then
+-- delete it natively after 250 local note edits and 250 local style edits.
+-- Exactly the 500 locally changed annotations must survive and detach.
+local provenance_stress_plugin = newPlugin(settings({
+    native_annotation_import_enabled = true,
+}))
+local provenance_stress_reader, provenance_stress_annotations = newImportReader()
+local provenance_stress_specs = {}
+for index = 1, 1000 do
+    table.insert(provenance_stress_specs, {
+        id = 1000 + index,
+        pos0 = string.format("/stress.%d.1", index),
+        pos1 = string.format("/stress.%d.2", index),
+        note = index % 2 == 0 and "native stress note" or "",
+    })
+end
+assert(completeNativeSnapshot(
+    provenance_stress_plugin, provenance_stress_reader, provenance_stress_specs
+))
+assert(#provenance_stress_annotations == 1000,
+    "maximum-size native snapshot must import all 1,000 annotations")
+for index = 1, 250 do
+    provenance_stress_annotations[index].note = "local stress edit"
+end
+for index = 251, 500 do
+    provenance_stress_annotations[index].drawer = "underscore"
+end
+assert(completeNativeSnapshot(provenance_stress_plugin, provenance_stress_reader, {}))
+assert(#provenance_stress_annotations == 500,
+    "native mass deletion must preserve exactly the 500 locally edited annotations")
+for index, item in ipairs(provenance_stress_annotations) do
+    assert(item.goodreads_native_provenance == nil,
+        "surviving stress annotation must detach native ownership")
+    if index <= 250 then
+        assert(item.note == "local stress edit", "stress deletion must preserve local notes")
+    else
+        assert(item.drawer == "underscore", "stress deletion must preserve local styles")
+    end
+end
 
 -- Position translation must be detached from KOReader's UI thread. Closing,
 -- suspending, or editing an annotation may persist a snapshot synchronously,

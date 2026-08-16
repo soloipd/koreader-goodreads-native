@@ -230,12 +230,37 @@ snapshot while ReaderSDK owns the exact local book. When the mapped converted
 book next opens or resumes in KOReader, `kindle.koplugin` v0.0.7 reverse-
 translates the native ranges in a detached batch.
 
-Import is additive. Missing highlights are created and a native note may fill
-an empty KOReader note. A non-empty KOReader note is never overwritten, and a
-native deletion does not delete KOReader data in v0.7.0. Exact and reversed
-duplicate ranges collapse. The root-only snapshot is removed only after
-KOReader emits its annotation persistence event. Annotation and note text
-never enter debug logs or dedupe receipts.
+The v2 exporter writes `snapshot_complete=true` only after the full bounded
+native list has been enumerated, validated, and serialized. Missing or
+incomplete snapshots cannot remove a KOReader highlight or note, or acknowledge
+a pending deletion tombstone.
+
+Version 0.8 records component-level provenance in KOReader's own annotation
+metadata. Missing native highlights are created as native-owned. If a native
+note fills an existing KOReader highlight, only the note is native-owned; the
+highlight remains local. Later complete snapshots can apply native note edits,
+note removal, and deletion of an unchanged native-created highlight.
+
+Local work always wins. Editing or removing an imported note is never undone by
+a stale native snapshot and protects the highlight from deletion. If Kindle
+later echoes that exact local note state, the baseline safely rebases and normal
+two-way deletion resumes. Changing an imported highlight's style detaches
+highlight ownership. Native deletion may remove an unchanged imported note from
+a pre-existing KOReader highlight, but never the highlight itself. Ambiguous
+v0.7 markers are preserved and detached rather than guessed. Exact and reversed
+duplicate ranges collapse.
+
+Deleting a native-imported highlight in KOReader records a bounded, text-free
+native-range tombstone. This prevents an older native snapshot from recreating
+the highlight while KOReader's outbound deletion is still queued. The tombstone
+is removed only when a later complete native snapshot no longer contains that
+range. Tombstones contain coordinates and timestamps, never annotation text.
+
+The root-only snapshot is removed only after KOReader's annotation persistence
+event succeeds; a failed event is replayed without duplicating annotations.
+Annotation and note text never enter debug logs or dedupe receipts. The note
+baseline used to detect local edits remains private inside KOReader's existing
+annotation metadata.
 
 ### Native and cloud delivery
 

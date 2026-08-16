@@ -5,7 +5,7 @@ set -u
 
 JAVA_BIN="/usr/java/bin/java"
 PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
-AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-export-agent-v1.jar"
+AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-export-agent-v2.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
 LOCK_DIR="/tmp/goodreads-annotation-export.lock"
 payload="${1:-}"
@@ -82,7 +82,8 @@ while [ "$attempt" -lt 60 ]; do
     if grep -Eq '^success=(true|false)$' "$result" 2>/dev/null; then
         chown 0:0 "$result" 2>/dev/null || true
         chmod 0600 "$result"
-        grep -Fqx 'success=true' "$result"
+        grep -Fqx 'success=true' "$result" \
+            && grep -Fqx 'snapshot_complete=true' "$result"
         exit $?
     fi
     attempt=$((attempt + 1))
