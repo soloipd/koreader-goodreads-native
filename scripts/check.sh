@@ -11,6 +11,9 @@ sh -n "$plugin_dir/bin/sync-progress"
 sh -n "$plugin_dir/bin/sync-rating"
 sh -n "$plugin_dir/bin/sync-annotations"
 sh -n "$plugin_dir/bin/watch-pending-annotations"
+sh -n "$project_root/experiments/background-annotation-sync/build.sh"
+sh -n "$project_root/experiments/background-annotation-sync/run-readonly-probe.sh"
+sh -n "$project_root/experiments/background-annotation-sync/run-canary.sh"
 grep -Fq 'chown "$framework_uid:$framework_gid" "$payload"' "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: annotation payload is not transferred to the framework JVM user\n' >&2; exit 1; }
 grep -Fq 'KSDKAnnotationsEnqueueForSync' "$plugin_dir/bin/sync-annotations" \
@@ -54,7 +57,10 @@ if command -v shellcheck >/dev/null 2>&1; then
         "$plugin_dir/bin/watch-pending-annotations" \
         "$project_root/scripts/build.sh" \
         "$project_root/scripts/check.sh" \
-        "$project_root/scripts/package.sh"
+        "$project_root/scripts/package.sh" \
+        "$project_root/experiments/background-annotation-sync/build.sh" \
+        "$project_root/experiments/background-annotation-sync/run-readonly-probe.sh" \
+        "$project_root/experiments/background-annotation-sync/run-canary.sh"
 fi
 
 lua_checker=""
@@ -137,8 +143,11 @@ if command -v "$javac_bin" >/dev/null 2>&1 && command -v "$java_bin" >/dev/null 
     "$javac_bin" --release 8 -Xlint:-options -d "$annotation_test_dir" \
         "$project_root/agent/src/GoodreadsAnnotationAgentV3.java" \
         "$project_root/agent/src/GoodreadsAnnotationAgentV27.java" \
+        "$project_root/experiments/background-annotation-sync/BackgroundAnnotationCanaryAgentV1.java" \
+        "$project_root/experiments/background-annotation-sync/BackgroundAnnotationCanaryAgentV1Test.java" \
         "${annotation_test_sources[@]}"
     "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationAgentV27Test
+    "$java_bin" -cp "$annotation_test_dir" BackgroundAnnotationCanaryAgentV1Test
 else
     printf 'warning: Java toolchain unavailable; annotation agent behavior tests were skipped\n' >&2
 fi

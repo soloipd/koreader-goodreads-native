@@ -16,8 +16,9 @@ or upload annotations. It reports only allowlisted capability booleans and
 counts; it never logs book paths, ASINs, highlight text, note text, credentials,
 or arbitrary reflected values.
 
-The write stage is intentionally not implemented yet. It must remain blocked
-until all read-only gates pass and a dedicated disposable canary book is chosen.
+The write stage is implemented as an experiment-only, confirmation-gated
+canary harness. It is excluded from release packages and must remain blocked
+until all read-only gates pass and a dedicated canary range is chosen.
 
 ## Read-only gates
 
@@ -60,7 +61,7 @@ justify enabling background writes in the production plugin.
 
 ## Canary write design
 
-The next stage should use a disposable test book and a synthetic one-character
+The write stage uses a disposable test range and a synthetic one-character
 highlight at a verified mapped position. It must:
 
 - snapshot native and KOReader annotation state first;
@@ -73,6 +74,13 @@ highlight at a verified mapped position. It must:
 - verify cloud appearance separately;
 - delete the canary through the same path and verify disappearance;
 - automatically restore the snapshots on any mismatch.
+
+The agent refuses to write while ReaderSDK reports an active native book. It
+opens a detached handle only to validate the exact identity and construct the
+native position/export object. It never calls the detached annotation manager.
+The exact in-memory canary object is retained inside the framework JVM and must
+be reused for deletion; a framework restart between create and delete is a stop
+condition requiring manual cleanup through the native reader.
 
 ## Stop conditions
 
@@ -94,6 +102,18 @@ JAVAC=/path/to/javac JAR=/path/to/jar ./experiments/background-annotation-sync/b
 
 The generated JAR is placed under `agent/build/experiments/` and is not included
 in release packages.
+
+Validate a selected range before writing:
+
+```sh
+./experiments/background-annotation-sync/run-canary.sh \
+  validate KINDLE_IP PORT ASIN NATIVE_KFX START START_SHORT END END_SHORT
+```
+
+Create or delete requires the explicit final argument
+`--confirm-background-write`. Run `status` between those operations to verify
+that the rollback object remains resident. The runner prints only allowlisted
+booleans and stage names.
 
 ## Device run
 
