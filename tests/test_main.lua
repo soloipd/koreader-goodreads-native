@@ -13,6 +13,13 @@ end
 
 package.preload["ui/widget/infomessage"] = simpleWidget
 package.preload["ui/widget/buttondialog"] = simpleWidget
+package.preload["ui/event"] = function()
+    return {
+        new = function(_, name, args)
+            return { name = name, args = args }
+        end,
+    }
+end
 package.preload["ui/uimanager"] = function()
     return {
         show = function(_, message)
@@ -320,6 +327,69 @@ assert(collapsed_ranges == 2, "duplicate collapse count must be observable")
 assert(normalized_ranges[2].note ~= "", "a non-empty duplicate note must be retained")
 assert(normalized_note_bytes == #normalized_ranges[2].note,
     "payload limits must count only retained duplicate-note bytes")
+
+-- Native imports are additive: create missing ranges, fill only an empty note,
+-- preserve a conflicting KOReader note, emit one persistence event, and
+-- acknowledge the private snapshot only after that event succeeds.
+local import_plugin = newPlugin(settings({
+    annotation_sync_enabled = true,
+    native_annotation_import_enabled = true,
+}))
+local import_snapshot_path = "/tmp/goodreads-native-import-merge-test"
+local snapshot_file = assert(io.open(import_snapshot_path, "w"))
+snapshot_file:write("private test snapshot")
+snapshot_file:close()
+local empty_note = { drawer = "lighten", pos0 = "/a.1", pos1 = "/a.2", note = "" }
+local conflict = { drawer = "lighten", pos0 = "/b.1", pos1 = "/b.2", note = "KOReader wins" }
+local imported_annotations = { empty_note, conflict }
+local imported_event
+local import_reader = {
+    annotation = {
+        annotations = imported_annotations,
+        addItem = function(_, item)
+            table.insert(imported_annotations, item)
+            return #imported_annotations
+        end,
+    },
+    document = {
+        getTextFromXPointers = function(_, first, second)
+            return first .. second
+        end,
+    },
+    view = { highlight = { saved_drawer = "underscore" } },
+    toc = { getTocTitleByPage = function() return "Chapter" end },
+    handleEvent = function(_, event) imported_event = event end,
+}
+local import_snapshot = {
+    path = import_snapshot_path,
+    items = {
+        { note = "native fills empty" },
+        { note = "native conflict" },
+        { note = "" },
+        { note = "native new note" },
+    },
+}
+local import_positions = {
+    { start = { xpointer = "/a.1" }, ["end"] = { xpointer = "/a.2" } },
+    { start = { xpointer = "/b.2" }, ["end"] = { xpointer = "/b.1" } },
+    { start = { xpointer = "/c.1" }, ["end"] = { xpointer = "/c.2" } },
+    { start = { xpointer = "/d.1" }, ["end"] = { xpointer = "/d.2" } },
+}
+assert(import_plugin:applyNativeAnnotationImport(
+    import_reader, import_snapshot, import_positions))
+assert(empty_note.note == "native fills empty", "native import should fill an empty note")
+assert(conflict.note == "KOReader wins", "native import must preserve a conflicting KOReader note")
+assert(#imported_annotations == 4, "native import should add only missing ranges")
+assert(imported_annotations[3].drawer == "underscore", "import should inherit the reader drawer")
+assert(imported_annotations[4].note == "native new note", "new native note should be retained")
+assert(imported_event and imported_event.name == "AnnotationsModified",
+    "native import must emit KOReader's persistence event")
+assert(imported_event.args.nb_highlights_added == 2,
+    "native import event must count newly added highlights")
+assert(imported_event.args.nb_notes_added == 2,
+    "native import event must count new and filled notes")
+assert(io.open(import_snapshot_path, "r") == nil,
+    "native snapshot must be acknowledged after the persistence event")
 
 -- Position translation must be detached from KOReader's UI thread. Closing,
 -- suspending, or editing an annotation may persist a snapshot synchronously,

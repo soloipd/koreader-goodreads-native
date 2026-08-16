@@ -154,6 +154,21 @@ artifacts. The helper requests restrictive modes, but `/mnt/us` is FUSE-backed
 on Kindle and may not enforce POSIX mode bits; privacy comes from excluding
 annotation text and identifiers from the exported summary.
 
+## Experimental native annotation import
+
+A singleton `lipc-wait-event` watcher captures a read-only snapshot while the
+native reader owns the active local `/mnt/us/documents` book. The exporter
+performs no ReaderSDK write, KPP notification, journal entry, or sync request.
+Its private result is atomically moved into a root-only native-import inbox.
+
+When the matching converted book next opens or resumes, KOReader runs
+`kindle-helper translate-native-positions` as a detached batch job. Verified
+XPointers merge through `ReaderAnnotation:addItem` and one
+`AnnotationsModified` event. Missing ranges are added, empty notes may be
+filled, and conflicting non-empty KOReader notes win. The snapshot is removed
+only after that persistence event succeeds. Native deletion propagation is
+outside the experimental v0.7.0 contract.
+
 ## Upgrade behavior
 
 The JVM may retain a previously loaded agent class and JAR path. Release agents

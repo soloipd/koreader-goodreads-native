@@ -20,6 +20,8 @@ account token is required or stored.
   periodically while reading, on suspend/resume, and on close.
 - Runs KFX annotation-position translation in a detached worker, so page turns,
   suspend, book close, and the Bookshelf do not wait for the ARM extractor.
+- Optionally imports native Kindle highlights and notes into the matching
+  converted KOReader book using an additive, conflict-safe experimental path.
 - Offers configurable 2, 5, 10, or 15 minute periodic checkpoints.
 - Offers a one-time 1–5 star chooser when a book is completed.
 - Supports manual rating updates and clearing an existing rating.
@@ -41,8 +43,8 @@ account token is required or stored.
 - A jailbroken Kindle with KOReader.
 - Kindle firmware whose Amazon framework includes Java 21 and `jdk.attach`.
 - The Amazon account on the Kindle already linked to Goodreads.
-- `kindle.koplugin`; notes/highlights additionally require its
-  position-map-enabled converter build.
+- `kindle.koplugin`; notes/highlights require its position-map-enabled build,
+  and native-to-KOReader import requires v0.0.7 or newer.
 - The native Kindle framework must remain running; KOReader's
   `--framework_stop` mode is not supported.
 
@@ -211,6 +213,22 @@ in-flight request cannot erase a newer edit or deletion.
 If startup replay briefly overlaps ReaderReady reconciliation, lock contention
 is reported immediately and the newest snapshot retries after 15 seconds. It
 does not consume the 120-second missing-result timeout.
+
+### Experimental native Kindle → KOReader import
+
+Enable **Import native Kindle highlights (experimental)** under **Tools →
+Goodreads (native Kindle sync)**. Open or resume the local book once in the
+native Kindle reader. A low-power watcher captures its current annotation
+snapshot while ReaderSDK owns the exact local book. When the mapped converted
+book next opens or resumes in KOReader, `kindle.koplugin` v0.0.7 reverse-
+translates the native ranges in a detached batch.
+
+Import is additive. Missing highlights are created and a native note may fill
+an empty KOReader note. A non-empty KOReader note is never overwritten, and a
+native deletion does not delete KOReader data in v0.7.0. Exact and reversed
+duplicate ranges collapse. The root-only snapshot is removed only after
+KOReader emits its annotation persistence event. Annotation and note text
+never enter debug logs or dedupe receipts.
 
 ### Native and cloud delivery
 

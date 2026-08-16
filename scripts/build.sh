@@ -8,6 +8,7 @@ build_dir="$project_root/agent/build/jdk"
 classes_dir="$build_dir/classes"
 agent_jar="$project_root/goodreads.koplugin/bin/goodreads-progress-agent-v2.jar"
 annotation_agent_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-agent-v27.jar"
+annotation_export_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-export-agent-v1.jar"
 launcher_class="$project_root/goodreads.koplugin/bin/classes/AttachLauncher.class"
 
 javac_bin="${JAVAC:-javac}"
@@ -22,7 +23,8 @@ find "$(dirname "$annotation_agent_jar")" -maxdepth 1 -type f \
 "$javac_bin" --release 8 -d "$classes_dir" \
     "$source_dir/AttachLauncher.java" \
     "$source_dir/GoodreadsProgressAgentV2.java" \
-    "$source_dir/GoodreadsAnnotationAgentV27.java"
+    "$source_dir/GoodreadsAnnotationAgentV27.java" \
+    "$source_dir/GoodreadsAnnotationExportAgentV1.java"
 
 "$jar_bin" cfm "$agent_jar" "$project_root/agent/manifest-progress.mf" \
     -C "$classes_dir" GoodreadsProgressAgentV2.class \
@@ -34,13 +36,21 @@ find "$(dirname "$annotation_agent_jar")" -maxdepth 1 -type f \
     -C "$classes_dir" 'GoodreadsAnnotationAgentV27$Record.class' \
     -C "$classes_dir" 'GoodreadsAnnotationAgentV27$Counters.class'
 
+"$jar_bin" cfm "$annotation_export_jar" "$project_root/agent/manifest-annotation-export.mf" \
+    -C "$classes_dir" GoodreadsAnnotationExportAgentV1.class \
+    -C "$classes_dir" 'GoodreadsAnnotationExportAgentV1$ExportRecord.class'
+
 cp "$classes_dir/AttachLauncher.class" "$launcher_class"
-chmod 0644 "$agent_jar" "$annotation_agent_jar" "$launcher_class"
+chmod 0644 "$agent_jar" "$annotation_agent_jar" "$annotation_export_jar" "$launcher_class"
 chmod 0755 "$project_root/goodreads.koplugin/bin/sync-progress" \
     "$project_root/goodreads.koplugin/bin/sync-annotations" \
+    "$project_root/goodreads.koplugin/bin/export-native-annotations" \
+    "$project_root/goodreads.koplugin/bin/capture-native-annotations" \
+    "$project_root/goodreads.koplugin/bin/watch-native-annotations" \
     "$project_root/goodreads.koplugin/bin/watch-pending-annotations" \
     "$project_root/goodreads.koplugin/bin/manage-sync-receipts" \
     "$project_root/goodreads.koplugin/bin/acknowledge-annotation-outbox"
 
 printf 'Built %s\n' "$agent_jar"
 printf 'Built %s\n' "$annotation_agent_jar"
+printf 'Built %s\n' "$annotation_export_jar"

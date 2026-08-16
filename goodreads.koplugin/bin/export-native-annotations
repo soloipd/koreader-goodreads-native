@@ -1,0 +1,92 @@
+#!/bin/sh
+
+# Read-only export of the exact active native book's annotation coordinates.
+set -u
+
+JAVA_BIN="/usr/java/bin/java"
+PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
+AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-export-agent-v1.jar"
+LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
+LOCK_DIR="/tmp/goodreads-annotation-export.lock"
+payload="${1:-}"
+lock_acquired=0
+result=""
+
+cleanup() {
+    rm -f "$payload"
+    if [ "$lock_acquired" -eq 1 ]; then
+        rmdir "$LOCK_DIR" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+
+case "$payload" in
+    /tmp/goodreads-native-export-[0-9]*.properties) ;;
+    *) exit 2 ;;
+esac
+[ -f "$payload" ] && [ -x "$JAVA_BIN" ] && [ -r "$AGENT_JAR" ] \
+    && [ -r "$LAUNCHER_CLASSES/AttachLauncher.class" ] || exit 3
+
+mode="$(sed -n 's/^mode=//p' "$payload" | sed -n '1p')"
+asin="$(sed -n 's/^asin=//p' "$payload" | sed -n '1p')"
+request_id="$(sed -n 's/^request_id=//p' "$payload" | sed -n '1p')"
+case "$mode" in
+    active_snapshot) ;;
+    exact|'') printf '%s\n' "$asin" | grep -Eq '^B[A-Z0-9]{9}$' || exit 2 ;;
+    *) exit 2 ;;
+esac
+case "$request_id" in ''|*[!0-9]*) exit 2 ;; esac
+[ "$payload" = "/tmp/goodreads-native-export-$request_id.properties" ] || exit 2
+result="/tmp/goodreads-native-export-$request_id.result"
+
+write_failure() {
+    stage="$1"
+    printf '%s\n' 'version=1' "request_id=$request_id" \
+        'success=false' "failed_stage=$stage" >"$result"
+    [ -z "$asin" ] || printf '%s\n' "asin=$asin" >>"$result"
+    chmod 0600 "$result"
+}
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    write_failure lock_busy
+    exit 75
+fi
+lock_acquired=1
+
+framework_pid="$(ps -eo pid,args 2>/dev/null \
+    | awk '/ch.ethz.iks.concierge.framework.Framework/ && !/awk/ { print $1; exit }')"
+case "$framework_pid" in ''|*[!0-9]*) write_failure framework_unavailable; exit 5 ;; esac
+framework_uid="$(awk '/^Uid:/ { print $2; exit }' "/proc/$framework_pid/status" 2>/dev/null)"
+framework_gid="$(awk '/^Gid:/ { print $2; exit }' "/proc/$framework_pid/status" 2>/dev/null)"
+case "$framework_uid:$framework_gid" in
+    *[!0-9:]*|:|:*|*:) write_failure framework_identity; exit 5 ;;
+esac
+
+rm -f "$result"
+: >"$result" || exit 6
+chmod 0600 "$payload" "$result"
+if ! chown "$framework_uid:$framework_gid" "$payload" "$result"; then
+    write_failure transfer_payload
+    exit 6
+fi
+
+if ! "$JAVA_BIN" --add-modules jdk.attach \
+    -cp "$LAUNCHER_CLASSES" \
+    AttachLauncher "$framework_pid" "$AGENT_JAR" "$payload" >/dev/null 2>&1; then
+    write_failure attach_agent
+    exit 7
+fi
+
+attempt=0
+while [ "$attempt" -lt 60 ]; do
+    if grep -Eq '^success=(true|false)$' "$result" 2>/dev/null; then
+        chown 0:0 "$result" 2>/dev/null || true
+        chmod 0600 "$result"
+        grep -Fqx 'success=true' "$result"
+        exit $?
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+done
+write_failure wait_for_result
+exit 8
