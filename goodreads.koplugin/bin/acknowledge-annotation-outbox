@@ -1,0 +1,55 @@
+#!/bin/sh
+
+# Delete a source outbox snapshot only when it is exactly the sequence and
+# checksum that completed native reconciliation. An atomic rename prevents an
+# older in-flight request from unlinking a newer snapshot.
+
+set -u
+
+PRIVATE_STATE_DIR="${GOODREADS_PRIVATE_STATE_DIR:-/var/local/koreader-goodreads-native}"
+OUTBOX_DIR="$PRIVATE_STATE_DIR/annotation-outbox"
+
+[ "$#" -eq 3 ] || exit 2
+asin="$1"
+sequence="$2"
+checksum="$3"
+printf '%s\n' "$asin" | grep -Eq '^B[A-Z0-9]{9}$' || exit 2
+case "$sequence" in ''|*[!0-9]*) exit 2 ;; esac
+case "$checksum" in ''|*[!0-9a-f]*) exit 2 ;; esac
+[ ${#checksum} -eq 64 ] || exit 2
+
+source_file="$OUTBOX_DIR/$asin"
+ack_file="$OUTBOX_DIR/.ack-$asin-$$"
+if ! mv -f "$source_file" "$ack_file" 2>/dev/null; then
+    printf '%s\n' 'outbox_acknowledged=false'
+    exit 1
+fi
+
+# Deterministic race testing only; production's /var/local path never enters
+# this branch. It lets the test install a newer snapshot after the atomic move.
+case "$OUTBOX_DIR:${GOODREADS_ACK_TEST_BARRIER_DIR:-}" in
+    /tmp/*:/*)
+        : >"$GOODREADS_ACK_TEST_BARRIER_DIR/ready"
+        attempts=0
+        while [ ! -e "$GOODREADS_ACK_TEST_BARRIER_DIR/continue" ] \
+            && [ "$attempts" -lt 500 ]; do
+            attempts=$((attempts + 1))
+            sleep 0.01
+        done
+        ;;
+esac
+
+if grep -Fqx "sequence=$sequence" "$ack_file" \
+    && grep -Fqx "checksum=$checksum" "$ack_file"; then
+    rm -f "$ack_file"
+    printf '%s\n' 'outbox_acknowledged=true'
+    exit 0
+fi
+
+if [ ! -e "$source_file" ]; then
+    mv -f "$ack_file" "$source_file" || exit 1
+else
+    rm -f "$ack_file"
+fi
+printf '%s\n' 'outbox_acknowledged=false'
+exit 1

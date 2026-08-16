@@ -5,7 +5,8 @@ set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 helper="$project_root/goodreads.koplugin/bin/manage-sync-receipts"
 test_root="$(mktemp -d)"
-trap 'rm -rf "$test_root"' EXIT HUP INT TERM
+ack_root="$(mktemp -d /tmp/goodreads-outbox-test.XXXXXX)"
+trap 'rm -rf "$test_root" "$ack_root"' EXIT HUP INT TERM
 
 plugin_dir="$test_root/plugins/goodreads.koplugin"
 settings_dir="$test_root/settings"
@@ -39,6 +40,8 @@ native_notified=false
 journal_lane=unavailable
 upload_requested=false
 sync_enqueued=false
+outbox_sequence=7
+outbox_acknowledged=false
 cloud_observed=unavailable
 EOF
 printf '%s\n' 'private annotation text must never be exported' >"$pending_dir/$asin"
@@ -65,7 +68,8 @@ grep -Fqx -- "--once $asin" "$test_root/retry-called"
 # its bounded retry counter before invoking the sync helper.
 watch_plugin="$test_root/watch-plugin"
 watch_settings="$test_root/watch-settings"
-watch_pending="$watch_settings/goodreads_native_annotations_pending"
+watch_private="$test_root/watch-private"
+watch_pending="$watch_private/annotation-pending"
 mkdir -p "$watch_plugin/bin" "$watch_pending" "$test_root/watch-tmp"
 cat >"$watch_plugin/bin/sync-annotations" <<EOF
 #!/bin/sh
@@ -81,10 +85,48 @@ retry_count=2
 desired_count=0
 EOF
 GOODREADS_PLUGIN_DIR="$watch_plugin" GOODREADS_SETTINGS_DIR="$watch_settings" \
+    GOODREADS_PRIVATE_STATE_DIR="$watch_private" \
     GOODREADS_LOCK_DIR="$test_root" GOODREADS_TMP_DIR="$test_root/watch-tmp" \
     "$project_root/goodreads.koplugin/bin/watch-pending-annotations" --once "$asin"
 grep -Fqx 'retry_count=3' "$test_root/watcher-payload"
 test -e "$watch_pending/$asin"
+
+# Acknowledgement is compare-and-delete: a matching snapshot is removed, a
+# superseding snapshot is restored, and a snapshot created after the atomic
+# move survives successful acknowledgement of the older request.
+ack_helper="$project_root/goodreads.koplugin/bin/acknowledge-annotation-outbox"
+ack_outbox="$ack_root/annotation-outbox"
+barrier="$ack_root/barrier"
+checksum_a="$(printf 'a%.0s' {1..64})"
+checksum_b="$(printf 'b%.0s' {1..64})"
+mkdir -p "$ack_outbox" "$barrier"
+printf '%s\n' 'sequence=1' "checksum=$checksum_a" >"$ack_outbox/$asin"
+GOODREADS_PRIVATE_STATE_DIR="$ack_root" \
+    "$ack_helper" "$asin" 1 "$checksum_a" >/dev/null
+test ! -e "$ack_outbox/$asin"
+
+printf '%s\n' 'sequence=2' "checksum=$checksum_b" >"$ack_outbox/$asin"
+if GOODREADS_PRIVATE_STATE_DIR="$ack_root" \
+    "$ack_helper" "$asin" 1 "$checksum_a" >/dev/null 2>&1; then
+    printf 'error: superseding outbox was acknowledged as an older request\n' >&2
+    exit 1
+fi
+grep -Fqx 'sequence=2' "$ack_outbox/$asin"
+
+printf '%s\n' 'sequence=3' "checksum=$checksum_a" >"$ack_outbox/$asin"
+GOODREADS_PRIVATE_STATE_DIR="$ack_root" GOODREADS_ACK_TEST_BARRIER_DIR="$barrier" \
+    "$ack_helper" "$asin" 3 "$checksum_a" >"$ack_root/ack-result" &
+ack_pid=$!
+for _ in {1..500}; do
+    [ -e "$barrier/ready" ] && break
+    sleep 0.01
+done
+test -e "$barrier/ready"
+printf '%s\n' 'sequence=4' "checksum=$checksum_b" >"$ack_outbox/$asin"
+: >"$barrier/continue"
+wait "$ack_pid"
+grep -Fqx 'outbox_acknowledged=true' "$ack_root/ack-result"
+grep -Fqx 'sequence=4' "$ack_outbox/$asin"
 
 support_path="$(
     GOODREADS_PLUGIN_DIR="$plugin_dir" GOODREADS_SETTINGS_DIR="$settings_dir" \
@@ -117,6 +159,20 @@ GOODREADS_PLUGIN_DIR="$plugin_dir" GOODREADS_SETTINGS_DIR="$settings_dir" \
 test ! -e "$pending_dir/$asin"
 grep -Fqx 'state=discarded' "$receipt_dir/$asin"
 grep -Fqx 'retry_reason=user_discarded' "$receipt_dir/$asin"
+
+private_state="$test_root/private-state"
+mkdir -p "$private_state/annotation-outbox"
+printf '%s\n' 'source snapshot' >"$private_state/annotation-outbox/$asin"
+source_status="$(
+    GOODREADS_PLUGIN_DIR="$plugin_dir" GOODREADS_SETTINGS_DIR="$settings_dir" \
+        GOODREADS_PRIVATE_STATE_DIR="$private_state" GOODREADS_LOCK_DIR="$test_root" \
+        "$helper" status "$asin"
+)"
+grep -Fqx 'pending_present=true' <<<"$source_status"
+GOODREADS_PLUGIN_DIR="$plugin_dir" GOODREADS_SETTINGS_DIR="$settings_dir" \
+    GOODREADS_PRIVATE_STATE_DIR="$private_state" GOODREADS_LOCK_DIR="$test_root" \
+    "$helper" discard "$asin" >/dev/null
+test ! -e "$private_state/annotation-outbox/$asin"
 
 if GOODREADS_PLUGIN_DIR="$plugin_dir" GOODREADS_SETTINGS_DIR="$settings_dir" \
     GOODREADS_LOCK_DIR="$test_root" \

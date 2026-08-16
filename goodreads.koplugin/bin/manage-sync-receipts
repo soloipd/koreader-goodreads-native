@@ -9,7 +9,10 @@ set -u
 PLUGIN_DIR="${GOODREADS_PLUGIN_DIR:-/mnt/us/koreader/plugins/goodreads.koplugin}"
 SETTINGS_DIR="${GOODREADS_SETTINGS_DIR:-/mnt/us/koreader/settings}"
 RECEIPT_DIR="$SETTINGS_DIR/goodreads_native_sync_receipts"
-PENDING_DIR="$SETTINGS_DIR/goodreads_native_annotations_pending"
+PRIVATE_STATE_DIR="${GOODREADS_PRIVATE_STATE_DIR:-/var/local/koreader-goodreads-native}"
+PENDING_DIR="$PRIVATE_STATE_DIR/annotation-pending"
+LEGACY_PENDING_DIR="$SETTINGS_DIR/goodreads_native_annotations_pending"
+OUTBOX_DIR="$PRIVATE_STATE_DIR/annotation-outbox"
 WATCHER="$PLUGIN_DIR/bin/watch-pending-annotations"
 SUPPORT_FILE="$SETTINGS_DIR/goodreads_native_support.txt"
 LOCK_ROOT="${GOODREADS_LOCK_DIR:-/tmp}"
@@ -30,7 +33,7 @@ print_status() {
     if [ -r "$receipt" ]; then
         while IFS= read -r line; do
             case "$line" in
-                version=*|asin=*|state=*|updated_at=*|saved_at=*|waiting_at=*|queued_at=*|desired_count=*|note_count=*|retry_count=*|retry_reason=*|agent_generation=*|trigger=*|local_verified=*|native_notified=*|journal_lane=*|upload_requested=*|sync_enqueued=*|cloud_observed=*)
+                version=*|asin=*|state=*|updated_at=*|saved_at=*|waiting_at=*|queued_at=*|desired_count=*|note_count=*|retry_count=*|retry_reason=*|agent_generation=*|trigger=*|local_verified=*|native_notified=*|journal_lane=*|upload_requested=*|sync_enqueued=*|outbox_sequence=*|outbox_acknowledged=*|cloud_observed=*)
                     printf '%s\n' "$line"
                     ;;
             esac
@@ -38,7 +41,8 @@ print_status() {
     else
         printf '%s\n' 'state=none'
     fi
-    if [ -r "$PENDING_DIR/$asin" ]; then
+    if [ -r "$PENDING_DIR/$asin" ] || [ -r "$LEGACY_PENDING_DIR/$asin" ] \
+        || [ -r "$OUTBOX_DIR/$asin" ]; then
         printf '%s\n' 'pending_present=true' 'effective_state=waiting_native'
     else
         printf '%s\n' 'pending_present=false'
@@ -48,17 +52,19 @@ print_status() {
 discard_pending() {
     asin="$1"
     pending="$PENDING_DIR/$asin"
+    legacy_pending="$LEGACY_PENDING_DIR/$asin"
     book_lock="$LOCK_ROOT/goodreads-annotation-book-$asin.lock"
     if ! mkdir "$book_lock" 2>/dev/null; then
         printf '%s\n' 'discarded=false' 'reason=sync_in_progress'
         return 1
     fi
-    if [ ! -f "$pending" ]; then
+    outbox="$OUTBOX_DIR/$asin"
+    if [ ! -f "$pending" ] && [ ! -f "$legacy_pending" ] && [ ! -f "$outbox" ]; then
         rmdir "$book_lock" 2>/dev/null || true
         printf '%s\n' 'discarded=false' 'reason=no_pending_snapshot'
         return 1
     fi
-    if ! rm -f "$pending"; then
+    if ! rm -f "$pending" "$legacy_pending" "$outbox"; then
         rmdir "$book_lock" 2>/dev/null || true
         return 1
     fi
@@ -86,7 +92,8 @@ discard_pending() {
         "agent_generation=$agent_generation" 'trigger=manual_discard' \
         'local_verified=unavailable' 'native_notified=unavailable' \
         'journal_lane=unavailable' 'upload_requested=unavailable' \
-        'sync_enqueued=unavailable' 'cloud_observed=unavailable' >"$temp" || {
+        'sync_enqueued=unavailable' 'outbox_sequence=discarded' \
+        'outbox_acknowledged=unavailable' 'cloud_observed=unavailable' >"$temp" || {
             rmdir "$book_lock" 2>/dev/null || true
             return 1
         }
@@ -117,12 +124,14 @@ export_support() {
             [ -r "$receipt" ] || continue
             count=$((count + 1))
             printf '\n[book_%03d]\n' "$count"
-            for key in state updated_at saved_at waiting_at queued_at desired_count note_count retry_count retry_reason agent_generation trigger local_verified native_notified journal_lane upload_requested sync_enqueued cloud_observed; do
+            for key in state updated_at saved_at waiting_at queued_at desired_count note_count retry_count retry_reason agent_generation trigger local_verified native_notified journal_lane upload_requested sync_enqueued outbox_sequence outbox_acknowledged cloud_observed; do
                 value="$(receipt_value "$key" "$receipt")"
                 case "$value" in *[!0-9A-Za-z._-]*) value=redacted ;; esac
                 printf '%s=%s\n' "$key" "${value:-unknown}"
             done
-            if [ -r "$PENDING_DIR/$(basename "$receipt")" ]; then
+            if [ -r "$PENDING_DIR/$(basename "$receipt")" ] \
+                || [ -r "$LEGACY_PENDING_DIR/$(basename "$receipt")" ] \
+                || [ -r "$OUTBOX_DIR/$(basename "$receipt")" ]; then
                 printf '%s\n' 'pending_present=true'
             else
                 printf '%s\n' 'pending_present=false'
@@ -143,7 +152,7 @@ case "$action" in
         ;;
     retry)
         [ "$#" -eq 2 ] && is_asin "$2" || exit 2
-        if [ ! -r "$PENDING_DIR/$2" ]; then
+        if [ ! -r "$PENDING_DIR/$2" ] && [ ! -r "$LEGACY_PENDING_DIR/$2" ]; then
             printf '%s\n' 'retry_requested=false' 'reason=no_pending_snapshot'
             exit 1
         fi
