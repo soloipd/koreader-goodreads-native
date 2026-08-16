@@ -2330,6 +2330,7 @@ function Goodreads:showDiagnostics()
             enable_sync_lanes = true,
             attach_agent = true,
             wait_for_result = true,
+            lock_busy = true,
             user_discarded = true,
         }, "unavailable")
         local agent_generation = receipt.agent_generation == "27" and "27" or "unknown"

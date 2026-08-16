@@ -40,6 +40,14 @@ grep -Fq 'result.outbox_acknowledged == "true"' "$plugin_dir/main.lua" \
     || { printf 'error: annotation success does not require outbox acknowledgement\n' >&2; exit 1; }
 grep -Fq 'failed_stage=outbox_superseded' "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: superseded outbox requests are not rejected\n' >&2; exit 1; }
+lock_busy_block="$(sed -n '/if ! mkdir "$LOCK_DIR"/,/^[[:space:]]*fi$/p' \
+    "$plugin_dir/bin/sync-annotations")"
+grep -Fq 'failed_stage=lock_busy' <<<"$lock_busy_block" \
+    || { printf 'error: annotation lock contention has no immediate result\n' >&2; exit 1; }
+grep -Fq 'publish_result' <<<"$lock_busy_block" \
+    || { printf 'error: annotation lock contention waits for the result timeout\n' >&2; exit 1; }
+grep -Fq 'write_receipt failed "$request_result" lock_busy' <<<"$lock_busy_block" \
+    || { printf 'error: annotation lock contention has no durable retry receipt\n' >&2; exit 1; }
 grep -Fq 'chown "$framework_uid:$framework_gid" "$payload"' "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: annotation payload is not transferred to the framework JVM user\n' >&2; exit 1; }
 grep -Fq 'KSDKAnnotationsEnqueueForSync' "$plugin_dir/bin/sync-annotations" \
@@ -89,6 +97,7 @@ if command -v shellcheck >/dev/null 2>&1; then
 fi
 
 "$project_root/tests/test_sync_receipts.sh"
+"$project_root/tests/test_annotation_lock.sh"
 
 lua_checker=""
 for candidate in luac5.1 luac lua5.1 luajit; do

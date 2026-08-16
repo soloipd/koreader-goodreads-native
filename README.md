@@ -208,6 +208,10 @@ reloaded and the newest snapshot resumes. Native success deletes the source
 snapshot only through an atomic sequence/checksum comparison, so an older
 in-flight request cannot erase a newer edit or deletion.
 
+If startup replay briefly overlaps ReaderReady reconciliation, lock contention
+is reported immediately and the newest snapshot retries after 15 seconds. It
+does not consume the 120-second missing-result timeout.
+
 ### Native and cloud delivery
 
 When the exact native book is active, the plugin updates Kindle's local
