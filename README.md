@@ -147,51 +147,66 @@ device or support bundle if you do not want to disclose your reading ASINs.
 
 ## Notes and highlights
 
-For books converted by a position-map-enabled `kindle.koplugin`, KOReader
-highlight and note ranges are translated from normalized EPUB XPointers to the
-original KFX EID/offset coordinates. The plugin reconciles creates, note edits,
-note removal, and annotation deletion on reader open, annotation changes,
-suspend, close, and the manual sync action. The coordinate map contains no book
-or annotation text. Rapid changes are serialized: the latest snapshot for each
-book replaces stale queued work, transient failures retry up to three times,
-and close-time snapshots can retry after the reader UI has unloaded the book.
-If ReaderSDK has released the exact local KFX handle, the newest snapshot is
-coalesced into a root-only pending file. A single low-power LIPC watcher waits
-for Kindle's native-reader start event and replays that snapshot automatically
-when the matching local book is opened; cloud placeholders with the same ASIN
-are never selected.
-Each reconciliation updates ReaderSDK's local store and explicitly sends
-Kindle's KPP annotation-change notification. It then detects the annotation
-pipeline enabled by the running firmware. Legacy-journal firmware receives
-native `JournalingService` entries followed by a `WhisperSyncV1` upload
-request; KSDK-enabled firmware receives the corresponding KSDK proxy write.
-The optional direct WhisperStore snapshot path is used only when that firmware
-feature is enabled. These explicit steps are required because detached books
-are not marked as live KPPReader books, so ReaderSDK suppresses parts of the
-native pipeline. The agent therefore reconciles only against an exact active
-path and leaves inactive work pending for the native-open watcher. Only after local verification, native
-notification, a supported native journal write, and an upload request does the
-helper wake the system annotation and WhisperSync queues. The helper enables
-the legacy journal and KSDK sync lanes before the write. Diagnostics report
-each stage separately and never equate a disabled bridge with cloud delivery.
+Annotation sync requires a converted book created by a position-map-enabled
+`kindle.koplugin`. The converter records a text-free coordinate map, allowing
+the plugin to translate KOReader's EPUB highlight ranges back to the original
+Kindle KFX positions.
 
-The upgrade migration removes annotations produced by older zero-endpoint
-ranges from the native store and active cloud journal before replaying
-corrected ranges. Terminal KFX endpoints are reconstructed through Kindle's
-native position factory, preventing a short selection from expanding back to
-location 1. On firmware with the optional WhisperStore path, cloud
-serialization omits only color metadata that its bridge cannot serialize;
-native color is not changed.
+The plugin synchronizes:
 
-Annotation text exists only in KOReader's own metadata, a mode-0600 request,
-the coalesced pending snapshot when native KPP is inactive, and the native
-Kindle annotation store. Transient requests and successful pending snapshots
-are removed after use. Logs and plugin dedupe state contain counts and
-coordinates only.
+- new and deleted highlights;
+- new, edited, and removed notes; and
+- the latest complete annotation state after rapid consecutive changes.
 
-Goodreads-linked Kindle notes and highlights remain private by default when
-they travel through Amazon's native pipeline; sharing visibility should remain
-an explicit user choice. This plugin never publishes annotation text.
+Synchronization is triggered when the reader opens, annotations change, the
+device suspends or resumes, the book closes, or the manual sync action runs.
+Requests are processed one at a time, and newer changes replace stale queued
+snapshots for the same book.
+
+### When the native Kindle book is closed
+
+This firmware cannot reliably apply annotations through a detached background
+book handle. A call may appear to succeed without producing a visible native
+annotation or an Amazon upload. The plugin therefore writes the newest snapshot
+to a private pending queue and waits for the exact local Kindle book to open.
+A low-power listener then retries automatically. A cloud placeholder sharing
+the same ASIN is never used as a substitute for the local book.
+
+### Native and cloud delivery
+
+When the exact native book is active, the plugin updates Kindle's local
+annotation store and sends its annotation-change notification. It then uses the
+pipeline enabled by the firmware:
+
+- legacy firmware writes `JournalingService` entries and requests a
+  `WhisperSyncV1` upload;
+- KSDK-enabled firmware uses the KSDK annotation proxy; and
+- the optional WhisperStore snapshot path is used only when the firmware has
+  explicitly enabled it.
+
+A request is reported as successful only after local readback, native
+notification, a supported journal or KSDK write, and an upload-queue request
+all succeed. Diagnostics report these stages separately and never treat a
+disabled service as successful delivery.
+
+### Upgrade repairs
+
+The upgrade migration removes malformed annotations created by older
+zero-endpoint mappings before replaying corrected ranges. Terminal KFX
+positions are rebuilt through Kindle's native position factory, preventing a
+small selection from expanding into an oversized highlight beginning at
+location 1. Native highlight color is left unchanged.
+
+### Privacy
+
+Highlight and note text is limited to KOReader's metadata, private mode-0600
+request or pending files, Kindle's native annotation store, and Amazon's normal
+annotation pipeline. Temporary and successfully delivered requests are
+removed. Diagnostics contain counts and coordinates, never annotation text.
+
+Annotations are delivered to Kindle/Amazon Notebook, not Goodreads. Goodreads
+integration covers shelves, reading progress, completion, and ratings. This
+plugin does not publish annotation text or change its sharing visibility.
 
 See [Architecture](docs/architecture.md) and
 [Kindle native-service notes](docs/reverse-engineering-notes.md) for details.
