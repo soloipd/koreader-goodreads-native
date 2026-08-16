@@ -69,6 +69,9 @@ Status labels describe `main`, not unreleased experiments:
 
 ### Device gate — native-to-KOReader annotation reconciliation
 
+- Repair stale converted-book source paths from the current Kindle catalog;
+  accept only one readable, complete local row and fail closed on ambiguity.
+
 - v0.7 imports native ranges through the position-map-enabled companion plugin.
 - v0.8 adds component provenance, native note edits/removal, safe highlight
   deletion, local-edit protection, and coordinate-only deletion tombstones.

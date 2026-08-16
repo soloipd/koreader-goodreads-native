@@ -273,6 +273,12 @@ Annotation and note text never enter debug logs or dedupe receipts. The note
 baseline used to detect local edits remains private inside KOReader's existing
 annotation metadata.
 
+Before annotation import or export, the plugin validates the native source
+against Kindle's current read-only content catalog. If a conversion still
+points at a file that Kindle moved or replaced, the unique readable, visible,
+non-archived local ebook row is used. Multiple valid local rows are never
+guessed between; annotation handoff pauses until the ambiguity is resolved.
+
 ### Native and cloud delivery
 
 When the exact native book is active, the plugin updates Kindle's local

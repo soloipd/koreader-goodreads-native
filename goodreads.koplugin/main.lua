@@ -693,23 +693,81 @@ function Goodreads:persistAnnotationOutbox(snapshot)
     return persistAnnotationOutbox(snapshot, self.annotation_outbox_fault_stage)
 end
 
-local function getAnnotationBookPaths(reader)
+local function isSupportedNativeBookPath(path)
+    if type(path) ~= "string"
+        or not path:match("^/mnt/us/documents/.+")
+        or path:find("[\r\n%z]")
+    then
+        return false
+    end
+    local extension = path:lower():match("%.([%w]+)$")
+    return extension == "kfx"
+        or extension == "azw"
+        or extension == "azw3"
+        or extension == "mobi"
+        or extension == "prc"
+end
+
+local function resolveNativeBookPathFromCatalog(asin)
+    if not isAsin(asin) then return nil, "invalid" end
+
+    -- kindle.koplugin's in-memory source_path can outlive a catalog move or
+    -- replacement. Resolve only complete, visible, local ebook rows and return
+    -- a path only when exactly one distinct readable candidate exists. hex()
+    -- keeps arbitrary catalog path bytes out of sqlite's line protocol.
+    local query = string.format([[
+SELECT DISTINCT lower(hex(p_location))
+FROM Entries
+WHERE p_cdeKey='%s'
+  AND p_cdeType IN ('EBOK','PDOC')
+  AND COALESCE(p_isArchived,0)=0
+  AND COALESCE(p_isDownloading,0)=0
+  AND COALESCE(p_isVisibleInHome,1)=1
+  AND COALESCE(p_contentState,1)=1
+  AND p_location LIKE '/mnt/us/documents/%%'
+  AND (lower(p_location) GLOB '*.kfx'
+    OR lower(p_location) GLOB '*.azw'
+    OR lower(p_location) GLOB '*.azw3'
+    OR lower(p_location) GLOB '*.mobi'
+    OR lower(p_location) GLOB '*.prc')
+LIMIT 3;]], asin)
+    local command = string.format(
+        "%s -readonly %s \"%s\" 2>/dev/null",
+        SQLITE_TOOL,
+        CONTENT_CATALOG,
+        query
+    )
+    local pipe = io.popen(command, "r")
+    if not pipe then return nil, "unavailable" end
+    local candidates = {}
+    for encoded in pipe:lines() do
+        local path = hexDecode(encoded, 4096)
+        if path and isSupportedNativeBookPath(path) and isReadable(path) then
+            table.insert(candidates, path)
+        end
+    end
+    pipe:close()
+    if #candidates == 1 then return candidates[1], "unique" end
+    if #candidates > 1 then return nil, "ambiguous" end
+    return nil, "not_found"
+end
+
+local function getAnnotationBookPaths(reader, asin)
     local document = reader and reader.document
     local epub_path = document and document.file
     local book = getKindleLibraryBook(reader)
-    local native_path = book and book.source_path
-    local native_extension = type(native_path) == "string"
-        and native_path:lower():match("%.([%w]+)$")
-    local supported_native_extension = native_extension == "kfx"
-        or native_extension == "azw"
-        or native_extension == "azw3"
-        or native_extension == "mobi"
-        or native_extension == "prc"
+    local mapped_path = book and book.source_path
+    local native_path, catalog_status = resolveNativeBookPathFromCatalog(asin)
+    if not native_path
+        and catalog_status ~= "ambiguous"
+        and isSupportedNativeBookPath(mapped_path)
+        and isReadable(mapped_path)
+    then
+        native_path = mapped_path
+    end
     if type(epub_path) ~= "string"
         or not epub_path:match("^/mnt/us/koreader/cache/.+%.epub$")
-        or type(native_path) ~= "string"
-        or not native_path:match("^/mnt/us/documents/.+")
-        or not supported_native_extension
+        or not isSupportedNativeBookPath(native_path)
     then
         return nil, nil
     end
@@ -775,7 +833,7 @@ function Goodreads:captureAnnotationSnapshot(reader, trigger)
         return nil, "annotation sync disabled"
     end
     local asin = getBookAsin(reader)
-    local epub_path, native_path = getAnnotationBookPaths(reader)
+    local epub_path, native_path = getAnnotationBookPaths(reader, asin)
     if not asin or not epub_path or not native_path then
         self:debugLog("annotations_sync_skipped", {
             trigger = trigger,
@@ -1779,7 +1837,7 @@ function Goodreads:queueNativeAnnotationImport(reader, completion)
         return false, "inflight", true
     end
     local asin = getBookAsin(reader)
-    local epub_path, native_path = getAnnotationBookPaths(reader)
+    local epub_path, native_path = getAnnotationBookPaths(reader, asin)
     if not asin or not epub_path or not native_path then
         return false, "book_paths_unavailable", false
     end
