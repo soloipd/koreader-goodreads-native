@@ -784,6 +784,17 @@ function Goodreads:captureAnnotationSnapshot(reader, trigger)
         })
         return nil, "Kindle source paths unavailable"
     end
+    if self.settings.native_annotation_import_enabled
+        and (self.native_import_inflight
+            or isReadable(NATIVE_IMPORT_DIR .. "/" .. asin))
+    then
+        self:debugLog("annotations_sync_skipped", {
+            trigger = trigger,
+            asin = asin,
+            status = "native_import_must_resolve_first",
+        })
+        return nil, "native import must resolve before outbound snapshot"
+    end
 
     local annotations = reader.annotation and reader.annotation.annotations or {}
     local desired, note_bytes, duplicates_collapsed, collect_error =
@@ -872,6 +883,18 @@ end
 function Goodreads:queueAnnotationSnapshot(snapshot)
     if not self.settings.annotation_sync_enabled then
         return false, "annotation sync disabled"
+    end
+    if self.settings.native_annotation_import_enabled
+        and isAsin(snapshot.asin)
+        and isReadable(NATIVE_IMPORT_DIR .. "/" .. snapshot.asin)
+    then
+        self:debugLog("annotations_sync_skipped", {
+            trigger = snapshot.trigger,
+            asin = snapshot.asin,
+            annotations = type(snapshot.desired) == "table" and #snapshot.desired or 0,
+            status = "native_import_must_resolve_first",
+        })
+        return false, "native import must resolve before queued outbound snapshot"
     end
     if self.annotation_sync_inflight then
         self:enqueuePendingAnnotationSnapshot(snapshot)
@@ -1699,8 +1722,11 @@ function Goodreads:applyNativeAnnotationImport(reader, snapshot, positions)
     if #modified > 0 then
         if highlight_delta ~= 0 then modified.nb_highlights_added = highlight_delta end
         if note_delta ~= 0 then modified.nb_notes_added = note_delta end
+        local previous_import_event = self.native_import_event_inflight
+        self.native_import_event_inflight = true
         local ok_event = pcall(reader.handleEvent, reader,
             Event:new("AnnotationsModified", modified))
+        self.native_import_event_inflight = previous_import_event
         if not ok_event then
             self.native_import_retry_path = snapshot.path
             self.native_import_retry_event = modified
@@ -1745,20 +1771,30 @@ function Goodreads:applyNativeAnnotationImport(reader, snapshot, positions)
     return true
 end
 
-function Goodreads:queueNativeAnnotationImport(reader)
-    if not self.settings.native_annotation_import_enabled or self.native_import_inflight then
-        return false
+function Goodreads:queueNativeAnnotationImport(reader, completion)
+    if not self.settings.native_annotation_import_enabled then
+        return false, "disabled", false
+    end
+    if self.native_import_inflight then
+        return false, "inflight", true
     end
     local asin = getBookAsin(reader)
     local epub_path, native_path = getAnnotationBookPaths(reader)
-    if not asin or not epub_path or not native_path then return false end
-    local snapshot = readNativeImportSnapshot(asin)
-    if not snapshot or snapshot.native_path ~= native_path then return false end
+    if not asin or not epub_path or not native_path then
+        return false, "book_paths_unavailable", false
+    end
+    local snapshot_path = NATIVE_IMPORT_DIR .. "/" .. asin
+    if not isReadable(snapshot_path) then return false, "no_snapshot", false end
+    local snapshot, snapshot_error = readNativeImportSnapshot(asin)
+    if not snapshot then return false, snapshot_error or "invalid_snapshot", true end
+    if snapshot.native_path ~= native_path then
+        return false, "snapshot_path_mismatch", true
+    end
     local helper
     for _, candidate in ipairs(KINDLE_HELPER_PATHS) do
         if isReadable(candidate) then helper = candidate break end
     end
-    if not helper then return false end
+    if not helper then return false, "position_helper_unavailable", true end
     local request_id = string.format("%d%d", os.time(), math.random(1000, 9999))
     local base = "/tmp/goodreads-native-import-" .. request_id
     local request_path, temp_path, result_path, failed_path =
@@ -1768,7 +1804,7 @@ function Goodreads:queueNativeAnnotationImport(reader)
         table.insert(requests, { start = item.start_long, ["end"] = item.end_long })
     end
     local request = openPrivateFile(request_path)
-    if not request then return false end
+    if not request then return false, "request_unavailable", true end
     request:write(json.encode(requests))
     request:close()
     os.execute("chmod 600 " .. util.shell_escape({ request_path }))
@@ -1779,16 +1815,26 @@ function Goodreads:queueNativeAnnotationImport(reader)
         util.shell_escape({ temp_path }), util.shell_escape({ temp_path }),
         util.shell_escape({ result_path }), util.shell_escape({ failed_path }),
         util.shell_escape({ request_path }))
-    if os.execute(command) ~= 0 then os.remove(request_path); return false end
+    if os.execute(command) ~= 0 then
+        os.remove(request_path)
+        return false, "translation_start_failed", true
+    end
     self.native_import_inflight = true
     local attempts = 0
     local function cleanup()
         for _, path in ipairs({ request_path, temp_path, result_path, failed_path }) do os.remove(path) end
         self.native_import_inflight = false
     end
+    local function complete(success, detail)
+        if type(completion) == "function" then completion(success, detail) end
+    end
     local function poll()
         attempts = attempts + 1
-        if isReadable(failed_path) then cleanup(); return end
+        if isReadable(failed_path) then
+            cleanup()
+            complete(false, "position_translation_failed")
+            return
+        end
         local output = readWholeFile(result_path, 1024 * 1024)
         if output then
             local ok, result = pcall(json.decode, output)
@@ -1803,18 +1849,90 @@ function Goodreads:queueNativeAnnotationImport(reader)
                         or #position["end"].xpointer > 65536
                         or position.start.xpointer:sub(1, 1) ~= "/"
                         or position["end"].xpointer:sub(1, 1) ~= "/"
-                    then cleanup(); return end
+                    then
+                        cleanup()
+                        complete(false, "position_translation_invalid")
+                        return
+                    end
                 end
                 cleanup()
-                self:applyNativeAnnotationImport(reader, snapshot, result.positions)
+                local imported, detail =
+                    self:applyNativeAnnotationImport(reader, snapshot, result.positions)
+                complete(imported == true, detail)
                 return
             end
-            cleanup(); return
+            cleanup()
+            complete(false, "position_translation_invalid")
+            return
         end
-        if attempts < 120 then UIManager:scheduleIn(1, poll) else cleanup() end
+        if attempts < 120 then
+            UIManager:scheduleIn(1, poll)
+        else
+            cleanup()
+            complete(false, "position_translation_timeout")
+        end
     end
     UIManager:scheduleIn(1, poll)
-    return true
+    return true, "queued", true
+end
+
+function Goodreads:queueConvergedAnnotationReconcile(reader, trigger, completion)
+    local completed = false
+    local function finish(success, detail)
+        if completed then return end
+        completed = true
+        if type(completion) == "function" then completion(success, detail) end
+    end
+    local function queueOutbound()
+        if completed then return false, "annotation flow already completed" end
+        if self.ui ~= reader or not reader.document then
+            finish(false, "reader changed before annotation reconciliation")
+            return false, "reader changed before annotation reconciliation"
+        end
+        local queued, detail = self:queueAnnotationReconcile(reader, trigger)
+        finish(queued == true, detail)
+        return queued, detail
+    end
+    local queued, detail, blocks_outbound = self:queueNativeAnnotationImport(
+        reader,
+        function(success, import_detail)
+            if success then
+                queueOutbound()
+            else
+                finish(false, import_detail or "native import failed")
+            end
+        end
+    )
+    if not queued and not blocks_outbound then
+        return queueOutbound()
+    elseif not queued and detail == "inflight" then
+        UIManager:scheduleIn(1, function()
+            if self.ui == reader and reader.document then
+                self:queueConvergedAnnotationReconcile(reader, trigger, completion)
+            else
+                finish(false, "reader changed before native import completed")
+            end
+        end)
+        return true, "waiting_for_native_import"
+    elseif not queued then
+        finish(false, detail)
+    end
+    return queued, detail, blocks_outbound
+end
+
+function Goodreads:startReaderReadyAnnotationFlow(reader)
+    return self:queueConvergedAnnotationReconcile(
+        reader,
+        "reader_ready_converged",
+        function(success, detail)
+            if not success then
+                self:debugLog("annotations_sync_skipped", {
+                    trigger = "reader_ready",
+                    status = safeDebugValue(detail or "native_import_failed"),
+                })
+            end
+        end
+    )
 end
 
 function Goodreads:scheduleAnnotationReconcile(trigger)
@@ -2164,9 +2282,10 @@ end
 
 function Goodreads:onReaderReady()
     self:scheduleProgressTimer()
-    self:scheduleAnnotationReconcile("reader_ready")
     UIManager:scheduleIn(0.5, function()
-        if self.ui and self.ui.document then self:queueNativeAnnotationImport(self.ui) end
+        if self.ui and self.ui.document then
+            self:startReaderReadyAnnotationFlow(self.ui)
+        end
     end)
     UIManager:scheduleIn(3, function()
         if self.ui and self.ui.document and self.settings.periodic_progress_enabled then
@@ -2193,7 +2312,12 @@ end
 function Goodreads:onResume()
     UIManager:scheduleIn(3, function()
         if self.ui and self.ui.document then
-            self:queueNativeAnnotationImport(self.ui)
+            local reader = self.ui
+            self:queueNativeAnnotationImport(reader, function(success)
+                if success and self.ui == reader and reader.document then
+                    self:scheduleAnnotationReconcile("resume_after_native_import")
+                end
+            end)
             self:syncReaderCheckpoint(self.ui, "resume")
             self:scheduleProgressTimer()
         end
@@ -2201,6 +2325,24 @@ function Goodreads:onResume()
 end
 
 function Goodreads:onAnnotationsModified(items)
+    if self.native_import_event_inflight then
+        local stats = annotationStats(self.ui)
+        self.last_annotation_event = {
+            time = os.time(),
+            changed = type(items) == "table" and #items or 0,
+            stats = stats,
+        }
+        self:debugLog("annotations_modified", {
+            trigger = "native_import",
+            changed = self.last_annotation_event.changed,
+            annotations = stats.total,
+            highlights = stats.highlights,
+            notes = stats.notes,
+            bookmarks = stats.bookmarks,
+            status = "native_import_persisted_without_echo",
+        })
+        return true
+    end
     self:rememberNativeAnnotationDeletion(items)
     local stats = annotationStats(self.ui)
     local changed = type(items) == "table" and #items or 0
@@ -3188,7 +3330,8 @@ function Goodreads:addToMainMenu(menu_items)
                     if self.settings.native_annotation_import_enabled then
                         self:startNativeAnnotationWatcher()
                         if self.ui and self.ui.document then
-                            self:queueNativeAnnotationImport(self.ui)
+                            self:queueConvergedAnnotationReconcile(
+                                self.ui, "native_import_enabled")
                         end
                     else
                         os.remove(NATIVE_IMPORT_ENABLED_FILE)
@@ -3222,12 +3365,18 @@ function Goodreads:addToMainMenu(menu_items)
                     return self.ui and self.ui.document and self.settings.annotation_sync_enabled
                 end,
                 callback = function()
-                    local ok, detail = self:queueAnnotationReconcile(self.ui, "manual")
-                    self:queueNativeAnnotationImport(self.ui)
-                    UIManager:show(InfoMessage:new({
-                        text = ok and _("Annotation sync queued.") or tostring(detail),
-                        timeout = 4,
-                    }))
+                    local reader = self.ui
+                    self:queueConvergedAnnotationReconcile(
+                        reader,
+                        "manual_converged",
+                        function(ok, detail)
+                            UIManager:show(InfoMessage:new({
+                                text = ok and _("Annotation sync queued.")
+                                    or tostring(detail),
+                                timeout = 4,
+                            }))
+                        end
+                    )
                 end,
             },
             {

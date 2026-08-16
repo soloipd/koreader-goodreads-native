@@ -18,14 +18,17 @@ sh -n "$plugin_dir/bin/exit-koreader-after-native-handoff"
 sh -n "$plugin_dir/bin/watch-pending-annotations"
 sh -n "$plugin_dir/bin/manage-sync-receipts"
 sh -n "$plugin_dir/bin/acknowledge-annotation-outbox"
+sh -n "$plugin_dir/bin/goodreads-doctor"
 test -x "$plugin_dir/bin/manage-sync-receipts"
 test -x "$plugin_dir/bin/acknowledge-annotation-outbox"
 test -x "$plugin_dir/bin/export-native-annotations"
 test -x "$plugin_dir/bin/capture-native-annotations"
 test -x "$plugin_dir/bin/watch-native-annotations"
 test -x "$plugin_dir/bin/exit-koreader-after-native-handoff"
+test -x "$plugin_dir/bin/goodreads-doctor"
 cmp -s "$project_root/VERSION" "$plugin_dir/VERSION" \
     || { printf 'error: packaged plugin version does not match release version\n' >&2; exit 1; }
+"$project_root/tests/test_doctor.sh"
 grep -Fq 'write_receipt saved_locally' "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: annotation sync does not persist its local-save receipt\n' >&2; exit 1; }
 grep -Fq 'write_receipt waiting_native' "$plugin_dir/bin/sync-annotations" \

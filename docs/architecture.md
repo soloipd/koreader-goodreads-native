@@ -182,11 +182,27 @@ only after the persistence event succeeds; failed events retain an in-memory
 replay record and the root-only snapshot. The private note baseline exists only
 in KOReader's own metadata and is excluded from logs and receipts.
 
+ReaderReady, resume, suspend, close, manual sync, and recovered outboxes all
+respect one ordering invariant: a pending native snapshot for a book must be
+resolved before any outbound snapshot for that book can run. Native-import
+persistence events are origin-guarded, then one converged full-state snapshot
+is captured so genuine KOReader-only annotations still travel outward. Invalid,
+mismatched, or failed imports remain pending and block stale outbound deletion.
+
 An official KOReader removal event for a provenance-bearing highlight records
 a bounded coordinate-only tombstone in plugin settings. A stale complete native
 snapshot containing that key is suppressed rather than re-imported. A later
 complete snapshot that omits the key acknowledges and removes the tombstone.
 No selected text or note content enters this deletion ledger.
+
+## SSH-safe doctor
+
+`bin/goodreads-doctor` is a read-only, fixed-schema process and installation
+check. It walks `/proc` to distinguish one nested KOReader process tree from
+multiple independent roots, checks only exact runtime/agent prerequisites, and
+counts private queue files without opening or naming them. It never invokes a
+reader launcher, LIPC mutation, signal, reboot, or network operation. Warnings
+exit `1`; hard integrity/single-instance failures exit `2`.
 
 ## Upgrade behavior
 

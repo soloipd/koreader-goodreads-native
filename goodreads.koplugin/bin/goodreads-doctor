@@ -1,0 +1,142 @@
+#!/bin/sh
+
+# Read-only, privacy-redacted health report for SSH troubleshooting.
+set -u
+
+PLUGIN_DIR="${GOODREADS_PLUGIN_DIR:-/mnt/us/koreader/plugins/goodreads.koplugin}"
+KOREADER_DIR="${GOODREADS_KOREADER_DIR:-/mnt/us/koreader}"
+PRIVATE_STATE_DIR="${GOODREADS_PRIVATE_STATE_DIR:-/var/local/koreader-goodreads-native}"
+PROC_ROOT="${GOODREADS_DOCTOR_PROC_ROOT:-/proc}"
+JAVA_BIN="${GOODREADS_DOCTOR_JAVA_BIN:-/usr/java/bin/java}"
+ARCH="${GOODREADS_DOCTOR_ARCH:-$(uname -m 2>/dev/null || printf unknown)}"
+
+warnings=0
+errors=0
+
+count_files() {
+    directory="$1"
+    count=0
+    for candidate in "$directory"/*; do
+        [ -f "$candidate" ] && count=$((count + 1))
+    done
+    printf '%s' "$count"
+}
+
+process_name() {
+    sed -n 's/^Name:[[:space:]]*//p' "$PROC_ROOT/$1/status" 2>/dev/null \
+        | sed -n '1p'
+}
+
+reader_processes=0
+reader_roots=0
+framework_processes=0
+watcher_processes=0
+for status_file in "$PROC_ROOT"/[0-9]*/status; do
+    [ -f "$status_file" ] || continue
+    process_dir="${status_file%/status}"
+    pid="${process_dir##*/}"
+    name="$(process_name "$pid")"
+    cwd="$(readlink "$process_dir/cwd" 2>/dev/null || true)"
+    if [ "$name" = "reader.lua" ] && [ "$cwd" = "$KOREADER_DIR" ]; then
+        reader_processes=$((reader_processes + 1))
+        parent="$(sed -n 's/^PPid:[[:space:]]*//p' "$status_file" 2>/dev/null \
+            | sed -n '1p')"
+        parent_name=""
+        case "$parent" in
+            ''|*[!0-9]*) ;;
+            *) parent_name="$(process_name "$parent")" ;;
+        esac
+        [ "$parent_name" = "reader.lua" ] \
+            || reader_roots=$((reader_roots + 1))
+    fi
+    cmdline="$process_dir/cmdline"
+    if [ -r "$cmdline" ] \
+        && grep -a -Fq 'ch.ethz.iks.concierge.framework.Framework' "$cmdline" 2>/dev/null
+    then
+        framework_processes=$((framework_processes + 1))
+    fi
+    if [ -r "$cmdline" ] \
+        && grep -a -Fq '/goodreads.koplugin/bin/watch-native-annotations' "$cmdline" 2>/dev/null
+    then
+        watcher_processes=$((watcher_processes + 1))
+    fi
+done
+
+version="$(sed -n '1p' "$PLUGIN_DIR/VERSION" 2>/dev/null || true)"
+if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+    version=unknown
+    errors=$((errors + 1))
+fi
+
+export_agents=0
+for agent in "$PLUGIN_DIR"/bin/goodreads-annotation-export-agent-v*.jar; do
+    [ -f "$agent" ] && export_agents=$((export_agents + 1))
+done
+[ "$export_agents" -eq 1 ] || errors=$((errors + 1))
+
+if [ "$reader_roots" -gt 1 ]; then
+    single_instance=error
+    errors=$((errors + 1))
+else
+    single_instance=ok
+fi
+
+if [ -x "$JAVA_BIN" ]; then
+    java_runtime=available
+else
+    java_runtime=missing
+    warnings=$((warnings + 1))
+fi
+
+if [ "$framework_processes" -gt 0 ]; then
+    native_framework=running
+else
+    native_framework=stopped
+    warnings=$((warnings + 1))
+fi
+
+if [ -e "$PRIVATE_STATE_DIR/native-import-enabled" ]; then
+    native_import_enabled=true
+    if [ "$reader_processes" -gt 0 ] && [ "$watcher_processes" -eq 0 ]; then
+        warnings=$((warnings + 1))
+    fi
+else
+    native_import_enabled=false
+fi
+
+annotation_outbox="$(count_files "$PRIVATE_STATE_DIR/annotation-outbox")"
+native_import_inbox="$(count_files "$PRIVATE_STATE_DIR/native-import")"
+pending_annotations="$(count_files "$PRIVATE_STATE_DIR/pending")"
+
+if [ "$errors" -gt 0 ]; then
+    overall=error
+    exit_status=2
+elif [ "$warnings" -gt 0 ]; then
+    overall=warning
+    exit_status=1
+else
+    overall=healthy
+    exit_status=0
+fi
+
+printf '%s\n' \
+    'schema=1' \
+    "plugin_version=$version" \
+    "architecture=$ARCH" \
+    "java_runtime=$java_runtime" \
+    "native_framework=$native_framework" \
+    "reader_processes=$reader_processes" \
+    "reader_roots=$reader_roots" \
+    "single_instance=$single_instance" \
+    "native_import_enabled=$native_import_enabled" \
+    "native_import_watchers=$watcher_processes" \
+    "annotation_outbox_books=$annotation_outbox" \
+    "native_import_books=$native_import_inbox" \
+    "pending_annotation_books=$pending_annotations" \
+    "export_agent_count=$export_agents" \
+    "warnings=$warnings" \
+    "errors=$errors" \
+    "reader_launch_attempted=false" \
+    "overall=$overall"
+
+exit "$exit_status"

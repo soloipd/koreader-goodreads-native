@@ -54,6 +54,8 @@ chmod 0755 "$project_root/goodreads.koplugin/bin/sync-progress" \
     "$project_root/goodreads.koplugin/bin/watch-pending-annotations" \
     "$project_root/goodreads.koplugin/bin/manage-sync-receipts" \
     "$project_root/goodreads.koplugin/bin/acknowledge-annotation-outbox"
+chmod 0755 "$project_root/goodreads.koplugin/bin/goodreads-doctor" \
+    "$project_root/tests/test_doctor.sh"
 chmod 0755 "$project_root/tests/test_release_stress.sh"
 
 printf 'Built %s\n' "$agent_jar"

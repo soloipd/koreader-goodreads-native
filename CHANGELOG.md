@@ -3,6 +3,33 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-08-16
+
+### Added
+
+- `goodreads-doctor`, a read-only SSH health command with a fixed redacted
+  schema. It reports plugin/runtime state, exact KOReader reader/root counts,
+  watcher state, queue counts, and agent count without launching a reader.
+- A maintained roadmap on `main` with implementation status and explicit
+  release/UAT gates.
+
+### Safety
+
+- Doctor output never contains ASINs, filenames, process arguments,
+  credentials, annotation text, note text, or device identifiers.
+- Duplicate independent KOReader roots and stale/multiple export agents are
+  hard errors; missing Java/framework prerequisites are explicit warnings.
+- CI and release stress include privacy fixtures, fault injection, forbidden
+  mutation-primitive checks, and a synthetic 1,003-process reader tree.
+- Native-import persistence events are origin-guarded so importing a Kindle
+  snapshot cannot enqueue an unnecessary outbound echo; later user edits still
+  schedule normally.
+- Reader startup now resolves a pending native snapshot before capturing any
+  outbound annotation state. Invalid, mismatched, or failed pending imports
+  block the pre-import snapshot instead of risking stale native deletions.
+- The same fail-closed ordering applies to suspend, close, manual sync, and
+  crash-recovered outboxes, preventing lifecycle races around ReaderReady.
+
 ## [0.8.0] - 2026-08-16
 
 ### Added
