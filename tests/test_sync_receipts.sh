@@ -209,4 +209,58 @@ grep -Fqx 'success=true' "$import_private/native-import/$asin"
 grep -Fqx 'item.0.note_hex=70726976617465' "$import_private/native-import/$asin"
 test "$(find "$import_tmp" -type f | wc -l | tr -d '[:space:]')" = 0
 
+# A confirmed native-reader handoff must select only the main KOReader process
+# and use its normal SIGTERM path. Forked reader.lua helpers are excluded by
+# their reader.lua parent, even though they inherit the same command line.
+fake_proc="$test_root/proc"
+fake_koreader="$test_root/fake-koreader"
+mkdir -p "$fake_proc/50" "$fake_proc/101" "$fake_proc/102" "$fake_koreader"
+printf '%s\n' 'Name: sh' 'PPid: 1' >"$fake_proc/50/status"
+printf '%s\n' 'Name: reader.lua' 'PPid: 50' >"$fake_proc/101/status"
+printf '%s\n' 'Name: reader.lua' 'PPid: 101' >"$fake_proc/102/status"
+printf '%s\n' './luajit ./reader.lua /book.epub' >"$fake_proc/101/cmdline"
+printf '%s\n' './luajit ./reader.lua /book.epub' >"$fake_proc/102/cmdline"
+ln -s "$fake_koreader" "$fake_proc/101/cwd"
+ln -s "$fake_koreader" "$fake_proc/102/cwd"
+selected_pid="$(
+    GOODREADS_PROC_ROOT="$fake_proc" GOODREADS_KOREADER_ROOT="$fake_koreader" \
+        GOODREADS_HANDOFF_DRY_RUN=1 \
+        "$project_root/goodreads.koplugin/bin/exit-koreader-after-native-handoff"
+)"
+test "$selected_pid" = 101
+
+# The initial already-active capture must not close KOReader. Exactly one
+# graceful handoff follows the next appStarted event and successful capture.
+watch_import_private="$test_root/watch-import-private"
+watch_import_lock="$test_root/watch-import-lock"
+mkdir -p "$watch_import_private" "$watch_import_lock"
+: >"$watch_import_private/native-import-enabled"
+cat >"$test_root/fake-capture" <<EOF
+#!/bin/sh
+printf 'capture\n' >>'$test_root/capture-calls'
+exit 0
+EOF
+cat >"$test_root/fake-handoff" <<EOF
+#!/bin/sh
+printf 'handoff\n' >>'$test_root/handoff-calls'
+EOF
+cat >"$test_root/fake-wait-event" <<EOF
+#!/bin/sh
+if [ ! -e '$test_root/event-delivered' ]; then
+    : >'$test_root/event-delivered'
+    exit 0
+fi
+exit 1
+EOF
+chmod 0755 "$test_root/fake-capture" "$test_root/fake-handoff" \
+    "$test_root/fake-wait-event"
+GOODREADS_CAPTURE="$test_root/fake-capture" \
+    GOODREADS_HANDOFF_HELPER="$test_root/fake-handoff" \
+    GOODREADS_PRIVATE_STATE_DIR="$watch_import_private" \
+    GOODREADS_LOCK_DIR="$watch_import_lock" \
+    GOODREADS_LIPC_WAIT_EVENT="$test_root/fake-wait-event" \
+    "$project_root/goodreads.koplugin/bin/watch-native-annotations"
+test "$(wc -l <"$test_root/capture-calls" | tr -d '[:space:]')" = 2
+test "$(wc -l <"$test_root/handoff-calls" | tr -d '[:space:]')" = 1
+
 printf 'Sync receipt tests passed.\n'

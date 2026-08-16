@@ -121,6 +121,13 @@ The saved value contains no account information and prevents unchanged
 percentages from being sent repeatedly. The periodic timer defaults to five
 minutes, but only a changed whole-number percentage reaches the native service.
 
+Periodic checkpoints use only the percentage transport; they do not repeatedly
+publish an unchanged Currently Reading shelf action. When experimental native
+annotation import confirms that Kindle has opened the exact local book, its
+watcher captures the snapshot and then asks KOReader to exit normally. This
+avoids leaving KOReader's power-event listener active behind KPP on affected
+firmware. The handoff never force-kills KOReader.
+
 On close, the live position is captured before KOReader unloads the document.
 The delayed shell work survives a full KOReader exit and lets other close hooks
 finish their native content-database writes first.

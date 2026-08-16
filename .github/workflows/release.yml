@@ -23,7 +23,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y lua5.1 shellcheck zip
 
       - name: Build, check, and package
-        run: make build check package
+        run: make build check stress package
 
       - name: Publish GitHub release
         env:

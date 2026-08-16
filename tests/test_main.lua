@@ -182,6 +182,35 @@ assert(plugin.last_checkpoint.percent == 46, "live progress must win over stale 
 assert(commands[#commands]:match("sync%-progress B0FLB24198 46"), "queued command must contain live 46 percent")
 assert(saved_settings == plugin.settings, "the observed ASIN should be persisted in plugin settings")
 
+-- Periodic ticks transport percentage only. Re-sending an unchanged native
+-- shelf action wakes KPP unnecessarily and can trigger a firmware event loop
+-- when KOReader remains behind the native reader.
+local periodic_plugin = newPlugin(settings({ enabled = true }))
+commands = {}
+assert(periodic_plugin:syncCapturedCheckpoint(
+    "B0FLB24198", 0.46, "reading", "periodic", "test"
+))
+assert(#commands == 1 and commands[1]:match("sync%-progress B0FLB24198 46"),
+    "periodic checkpoint must send only silent percentage")
+assert(not commands[1]:match("lipc%-hash%-prop"),
+    "periodic checkpoint must not republish the native shelf action")
+commands = {}
+assert(periodic_plugin:syncCapturedCheckpoint(
+    "B0FLB24198", 0.46, "reading", "reader_ready", "test"
+))
+assert(commands[1]:match("lipc%-hash%-prop"),
+    "reader-ready checkpoint must still publish the native shelf state")
+commands = {}
+for _ = 1, 1000 do
+    assert(periodic_plugin:syncCapturedCheckpoint(
+        "B0FLB24198", 0.46, "reading", "periodic", "stress"
+    ))
+end
+for _, command in ipairs(commands) do
+    assert(not command:match("lipc%-hash%-prop"),
+        "1,000 periodic checkpoints must publish zero shelf actions")
+end
+
 -- ReadHistory reopens converted Kindle books by their cache path after a
 -- restart. Resolve the sanitized cc.db UUID through kindle.koplugin's loaded
 -- virtual-library index and use its cde_key.

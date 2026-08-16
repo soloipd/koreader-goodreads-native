@@ -16,8 +16,15 @@ Run:
 ```sh
 make build
 make check
+make stress
 make package
 ```
+
+`make stress` is a mandatory CI and release gate. It exercises 1,000 native
+handoffs, 50 simultaneous watcher contenders, 1,000 inherited KOReader helper
+processes, and 1,000 periodic progress checkpoints. A release is not published
+if any handoff is duplicated, the wrong process is selected, a periodic shelf
+action leaks through, or the singleton watcher guarantee fails.
 
 The release plugin is generated in `goodreads.koplugin/`; install that entire
 directory on a test Kindle. Never test with account credentials embedded in

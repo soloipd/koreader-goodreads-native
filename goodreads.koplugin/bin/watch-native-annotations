@@ -4,12 +4,17 @@
 set -u
 
 PLUGIN_DIR="${GOODREADS_PLUGIN_DIR:-/mnt/us/koreader/plugins/goodreads.koplugin}"
-CAPTURE="$PLUGIN_DIR/bin/capture-native-annotations"
+CAPTURE="${GOODREADS_CAPTURE:-$PLUGIN_DIR/bin/capture-native-annotations}"
+HANDOFF="${GOODREADS_HANDOFF_HELPER:-$PLUGIN_DIR/bin/exit-koreader-after-native-handoff}"
 PRIVATE_STATE_DIR="${GOODREADS_PRIVATE_STATE_DIR:-/var/local/koreader-goodreads-native}"
 ENABLE_FILE="$PRIVATE_STATE_DIR/native-import-enabled"
 LOCK_ROOT="${GOODREADS_LOCK_DIR:-/tmp}"
 WATCH_LOCK="$LOCK_ROOT/goodreads-native-import-watcher.lock"
 LIPC_WAIT_EVENT="${GOODREADS_LIPC_WAIT_EVENT:-/usr/bin/lipc-wait-event}"
+HANDOFF_DELAY_SECONDS="${GOODREADS_HANDOFF_DELAY_SECONDS:-2}"
+
+case "$HANDOFF_DELAY_SECONDS" in ''|*[!0-9]*) exit 2 ;; esac
+[ "$HANDOFF_DELAY_SECONDS" -le 10 ] || exit 2
 
 if ! mkdir "$WATCH_LOCK" 2>/dev/null; then
     exit 0
@@ -21,7 +26,14 @@ trap 'rmdir "$WATCH_LOCK" 2>/dev/null || true' EXIT HUP INT TERM
 "$CAPTURE" >/dev/null 2>&1 || true
 while "$LIPC_WAIT_EVENT" com.lab126.appmgrd appStarted >/dev/null 2>&1; do
     [ -f "$ENABLE_FILE" ] || exit 0
-    sleep 2
-    "$CAPTURE" >/dev/null 2>&1 || true
+    [ "$HANDOFF_DELAY_SECONDS" -eq 0 ] || sleep "$HANDOFF_DELAY_SECONDS"
+    # A successful export proves that an exact local Kindle book is active.
+    # KOReader's Kindle power-event listener must not remain behind KPP on
+    # affected firmware: it can feed a high-rate powerd/D-Bus loop and freeze
+    # the native UI. Ask only the main KOReader process to shut down normally;
+    # never SIGKILL it, and never do this for the initial already-active probe.
+    if "$CAPTURE" >/dev/null 2>&1; then
+        "$HANDOFF" >/dev/null 2>&1 || true
+    fi
 done
 exit 0

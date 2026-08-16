@@ -14,6 +14,7 @@ sh -n "$plugin_dir/bin/sync-annotations"
 sh -n "$plugin_dir/bin/export-native-annotations"
 sh -n "$plugin_dir/bin/capture-native-annotations"
 sh -n "$plugin_dir/bin/watch-native-annotations"
+sh -n "$plugin_dir/bin/exit-koreader-after-native-handoff"
 sh -n "$plugin_dir/bin/watch-pending-annotations"
 sh -n "$plugin_dir/bin/manage-sync-receipts"
 sh -n "$plugin_dir/bin/acknowledge-annotation-outbox"
@@ -22,6 +23,7 @@ test -x "$plugin_dir/bin/acknowledge-annotation-outbox"
 test -x "$plugin_dir/bin/export-native-annotations"
 test -x "$plugin_dir/bin/capture-native-annotations"
 test -x "$plugin_dir/bin/watch-native-annotations"
+test -x "$plugin_dir/bin/exit-koreader-after-native-handoff"
 cmp -s "$project_root/VERSION" "$plugin_dir/VERSION" \
     || { printf 'error: packaged plugin version does not match release version\n' >&2; exit 1; }
 grep -Fq 'write_receipt saved_locally' "$plugin_dir/bin/sync-annotations" \
@@ -54,6 +56,12 @@ grep -Fq 'com.lab126.appmgrd appStarted' "$plugin_dir/bin/watch-native-annotatio
     || { printf 'error: native import watcher does not observe native-reader starts\n' >&2; exit 1; }
 grep -Fq 'native-import-enabled' "$plugin_dir/bin/watch-native-annotations" \
     || { printf 'error: native import watcher ignores the opt-in setting\n' >&2; exit 1; }
+grep -Fq 'exit-koreader-after-native-handoff' "$plugin_dir/bin/watch-native-annotations" \
+    || { printf 'error: native import watcher leaves KOReader behind KPP\n' >&2; exit 1; }
+if grep -Fq 'kill -KILL' "$plugin_dir/bin/exit-koreader-after-native-handoff"; then
+    printf 'error: native handoff helper may force-kill KOReader\n' >&2
+    exit 1
+fi
 grep -Fq 'result.outbox_acknowledged == "true"' "$plugin_dir/main.lua" \
     || { printf 'error: annotation success does not require outbox acknowledgement\n' >&2; exit 1; }
 grep -Fq 'failed_stage=outbox_superseded' "$plugin_dir/bin/sync-annotations" \
@@ -106,9 +114,11 @@ if command -v shellcheck >/dev/null 2>&1; then
     shellcheck --severity=warning "$plugin_dir/bin/sync-progress" \
         "$plugin_dir/bin/sync-rating" \
         "$plugin_dir/bin/sync-annotations" \
+        "$plugin_dir/bin/exit-koreader-after-native-handoff" \
         "$plugin_dir/bin/watch-pending-annotations" \
         "$plugin_dir/bin/manage-sync-receipts" \
         "$plugin_dir/bin/acknowledge-annotation-outbox" \
+        "$project_root/tests/test_lifecycle_stress.sh" \
         "$project_root/scripts/build.sh" \
         "$project_root/scripts/check.sh" \
         "$project_root/scripts/package.sh"
@@ -226,6 +236,7 @@ fi
 if grep -R -E -q \
     'github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16}' \
     --exclude-dir=.git --exclude-dir=kindle-plugin-fork \
+    --exclude-dir=kindle-position-roadmap-work \
     --exclude='*.jar' --exclude='*.class' "$project_root"; then
     printf 'error: possible credential committed in project files\n' >&2
     exit 1
