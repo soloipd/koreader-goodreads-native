@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.2] - 2026-08-16
+
+### Fixed
+
+- Native annotation lock contention now publishes an immediate retryable
+  `lock_busy` result instead of making KOReader poll for 120 seconds.
+- Startup/ReaderReady overlap now produces a redacted durable receipt and uses
+  the existing 15-second bounded retry/coalescing path.
+
 ## [0.6.1] - 2026-08-16
 
 ### Fixed

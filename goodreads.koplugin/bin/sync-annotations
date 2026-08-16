@@ -232,6 +232,16 @@ if ! mkdir -p "$STATE_DIR"; then
     exit 4
 fi
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    # Startup replay and ReaderReady can briefly overlap. Publish an immediate
+    # retryable result instead of making KOReader poll for 120 seconds.
+    printf '%s\n' \
+        "asin=$asin" "request_id=$request_id" "requested=$desired_count" \
+        "outbox_sequence=$outbox_sequence" 'outbox_acknowledged=false' \
+        'local_success=false' 'local_verified=false' 'native_notified=false' \
+        'native_cloud_queued=false' 'sync_enqueued=false' \
+        'success=false' 'failed_stage=lock_busy' >"$request_result"
+    publish_result || true
+    write_receipt failed "$request_result" lock_busy || true
     exit 75
 fi
 lock_acquired=1
