@@ -5,38 +5,75 @@
 
 set -u
 
-PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
+PLUGIN_DIR="${GOODREADS_PLUGIN_DIR:-/mnt/us/koreader/plugins/goodreads.koplugin}"
 SYNC_HELPER="$PLUGIN_DIR/bin/sync-annotations"
-PENDING_DIR="/mnt/us/koreader/settings/goodreads_native_annotations_pending"
-WATCH_LOCK="/tmp/goodreads-annotation-watcher.lock"
-LIPC_WAIT_EVENT="/usr/bin/lipc-wait-event"
+SETTINGS_DIR="${GOODREADS_SETTINGS_DIR:-/mnt/us/koreader/settings}"
+PENDING_DIR="$SETTINGS_DIR/goodreads_native_annotations_pending"
+LOCK_ROOT="${GOODREADS_LOCK_DIR:-/tmp}"
+WATCH_LOCK="$LOCK_ROOT/goodreads-annotation-watcher.lock"
+LIPC_WAIT_EVENT="${GOODREADS_LIPC_WAIT_EVENT:-/usr/bin/lipc-wait-event}"
+BOOK_LOCK_ROOT="$LOCK_ROOT"
+TMP_ROOT="${GOODREADS_TMP_DIR:-/tmp}"
 
-if ! mkdir "$WATCH_LOCK" 2>/dev/null; then
-    exit 0
+once_asin=""
+if [ "$#" -eq 2 ] && [ "$1" = "--once" ] \
+    && printf '%s\n' "$2" | grep -Eq '^B[A-Z0-9]{9}$'; then
+    once_asin="$2"
+elif [ "$#" -ne 0 ]; then
+    exit 2
 fi
-trap 'rmdir "$WATCH_LOCK" 2>/dev/null || true' EXIT HUP INT TERM
+
+if [ -z "$once_asin" ]; then
+    if ! mkdir "$WATCH_LOCK" 2>/dev/null; then
+        exit 0
+    fi
+    trap 'rmdir "$WATCH_LOCK" 2>/dev/null || true' EXIT HUP INT TERM
+fi
 
 replay_pending() {
     found=0
     for pending in "$PENDING_DIR"/B?????????; do
         [ -f "$pending" ] || continue
         found=1
+        asin="$(basename "$pending")"
+        if [ -n "$once_asin" ] && [ "$asin" != "$once_asin" ]; then
+            continue
+        fi
+        book_lock="$BOOK_LOCK_ROOT/goodreads-annotation-book-$asin.lock"
+        if ! mkdir "$book_lock" 2>/dev/null; then
+            continue
+        fi
         request_id="$(date +%s)$$"
-        payload="/tmp/goodreads-annotations-$request_id.properties"
+        payload="$TMP_ROOT/goodreads-annotations-$request_id.properties"
         if ! awk -F= -v id="$request_id" '
             /^request_id=/ { print "request_id=" id; next }
+            /^retry_count=/ {
+                retry=$2 + 0
+                if (retry < 999) retry++
+                print "retry_count=" retry
+                found_retry=1
+                next
+            }
             { print }
+            END { if (!found_retry) print "retry_count=1" }
         ' "$pending" >"$payload"; then
             rm -f "$payload"
+            rmdir "$book_lock" 2>/dev/null || true
             continue
         fi
         chmod 0600 "$payload"
         if "$SYNC_HELPER" "$payload"; then
             rm -f "$pending"
         fi
+        rmdir "$book_lock" 2>/dev/null || true
     done
     return "$found"
 }
+
+if [ -n "$once_asin" ]; then
+    replay_pending || true
+    exit 0
+fi
 
 # A pending snapshot may have been queued while the native book was already
 # activating, so try once before blocking for the next application start.

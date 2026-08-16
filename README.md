@@ -26,6 +26,11 @@ account token is required or stored.
   rapid edits and removals converge on the latest KOReader state.
 - Keeps shelf and percentage synchronization independently configurable.
 - Provides opt-in, redacted, rotating diagnostics and an on-device status view.
+- Persists a text-free per-book annotation receipt across KOReader restarts,
+  distinguishing saved, waiting-for-Kindle, Amazon-queued, and independently
+  cloud-observed states.
+- Provides manual pending retry, confirmation-gated pending discard, and an
+  anonymized support-summary export.
 - Uses only the Kindle's native authenticated services.
 - Never displays the native Goodreads sharing dialog.
 
@@ -133,6 +138,27 @@ compares:
 - the last percentage accepted and persisted for that ASIN; and
 - the latest native result, including success, HTTP status, or failure stage.
 
+For annotation sync, the same view also reads a durable per-book receipt from:
+
+```text
+/mnt/us/koreader/settings/goodreads_native_sync_receipts/<ASIN>
+```
+
+The receipt survives KOReader restarts and reports annotation/note counts,
+timestamps, retry reason, agent generation, native lane, local readback,
+upload-request status, and system-queue status. It contains no highlight or
+note text. An accepted upload request is shown as **queued to Amazon**; it is
+never called **cloud observed** without separate server readback.
+
+Under **Sync receipts and recovery**, you can retry the selected book's pending
+snapshot, discard only that pending snapshot after confirmation, or export an
+anonymized support summary. The export replaces ASINs with `book_001`-style
+labels and never reads annotation payload text. It is written to:
+
+```text
+/mnt/us/koreader/settings/goodreads_native_support.txt
+```
+
 The rotating log is stored at:
 
 ```text
@@ -199,10 +225,13 @@ location 1. Native highlight color is left unchanged.
 
 ### Privacy
 
-Highlight and note text is limited to KOReader's metadata, private mode-0600
-request or pending files, Kindle's native annotation store, and Amazon's normal
-annotation pipeline. Temporary and successfully delivered requests are
-removed. Diagnostics contain counts and coordinates, never annotation text.
+Highlight and note text is limited to KOReader's metadata, transient request or
+pending files, Kindle's native annotation store, and Amazon's normal annotation
+pipeline. Temporary and successfully delivered requests are removed.
+Diagnostics and support summaries contain counts and state only, never
+annotation text. Kindle's `/mnt/us` storage is FUSE-backed and may not enforce
+requested POSIX mode bits, so anyone with device-storage or root access should
+be treated as able to read a snapshot while it is pending.
 
 Annotations are delivered to Kindle/Amazon Notebook, not Goodreads. Goodreads
 integration covers shelves, reading progress, completion, and ratings. This

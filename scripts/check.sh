@@ -11,6 +11,20 @@ sh -n "$plugin_dir/bin/sync-progress"
 sh -n "$plugin_dir/bin/sync-rating"
 sh -n "$plugin_dir/bin/sync-annotations"
 sh -n "$plugin_dir/bin/watch-pending-annotations"
+sh -n "$plugin_dir/bin/manage-sync-receipts"
+test -x "$plugin_dir/bin/manage-sync-receipts"
+cmp -s "$project_root/VERSION" "$plugin_dir/VERSION" \
+    || { printf 'error: packaged plugin version does not match release version\n' >&2; exit 1; }
+grep -Fq 'write_receipt saved_locally' "$plugin_dir/bin/sync-annotations" \
+    || { printf 'error: annotation sync does not persist its local-save receipt\n' >&2; exit 1; }
+grep -Fq 'write_receipt waiting_native' "$plugin_dir/bin/sync-annotations" \
+    || { printf 'error: inactive annotation sync does not persist its waiting receipt\n' >&2; exit 1; }
+grep -Fq 'write_receipt queued_amazon' "$plugin_dir/bin/sync-annotations" \
+    || { printf 'error: accepted annotation sync does not persist its queue receipt\n' >&2; exit 1; }
+grep -Fq "'cloud_observed=unavailable'" "$plugin_dir/bin/sync-annotations" \
+    || { printf 'error: upload acceptance may be mislabeled as cloud observation\n' >&2; exit 1; }
+grep -Fq '"$WATCHER" --once "$2"' "$plugin_dir/bin/manage-sync-receipts" \
+    || { printf 'error: retry action does not request a one-shot replay\n' >&2; exit 1; }
 grep -Fq 'chown "$framework_uid:$framework_gid" "$payload"' "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: annotation payload is not transferred to the framework JVM user\n' >&2; exit 1; }
 grep -Fq 'KSDKAnnotationsEnqueueForSync' "$plugin_dir/bin/sync-annotations" \
@@ -52,10 +66,13 @@ if command -v shellcheck >/dev/null 2>&1; then
         "$plugin_dir/bin/sync-rating" \
         "$plugin_dir/bin/sync-annotations" \
         "$plugin_dir/bin/watch-pending-annotations" \
+        "$plugin_dir/bin/manage-sync-receipts" \
         "$project_root/scripts/build.sh" \
         "$project_root/scripts/check.sh" \
         "$project_root/scripts/package.sh"
 fi
+
+"$project_root/tests/test_sync_receipts.sh"
 
 lua_checker=""
 for candidate in luac5.1 luac lua5.1 luajit; do

@@ -3,6 +3,27 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-08-16
+
+### Added
+
+- Durable, text-free per-book annotation receipts that survive KOReader
+  restarts and distinguish local save, native-reader wait, Amazon queue, and
+  independently verified cloud states.
+- Receipt diagnostics for counts, timestamps, retry reason, agent generation,
+  active native lane, local readback, upload request, and system queue.
+- Manual retry and confirmation-gated discard actions for the selected book's
+  pending annotation snapshot.
+- A support-summary export that substitutes anonymous book numbers for ASINs
+  and never reads annotation payload text.
+
+### Changed
+
+- Annotation payloads now carry bounded retry and trigger metadata so durable
+  receipts remain meaningful after native-reader replay.
+- Upload acceptance is explicitly reported as queued, never as cloud-observed
+  without independent readback.
+
 ## [0.4.1] - 2026-08-16
 
 ### Fixed

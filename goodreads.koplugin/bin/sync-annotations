@@ -12,6 +12,7 @@ AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v27.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
 STATE_DIR="/mnt/us/koreader/settings/goodreads_native_annotations"
 PENDING_DIR="/mnt/us/koreader/settings/goodreads_native_annotations_pending"
+RECEIPT_DIR="/mnt/us/koreader/settings/goodreads_native_sync_receipts"
 PENDING_WATCHER="$PLUGIN_DIR/bin/watch-pending-annotations"
 LOCK_DIR="/tmp/goodreads-annotation-sync.lock"
 PUBLISHED_RESULT="/tmp/goodreads-annotation-result.log"
@@ -28,6 +29,10 @@ lock_acquired=0
 state_temp=""
 request_result=""
 pending_candidate=""
+desired_count=""
+note_count="0"
+retry_count="0"
+trigger="unknown"
 
 if [ "$#" -ne 1 ]; then
     exit 2
@@ -72,6 +77,101 @@ case "$request_id" in
     ''|*[!0-9]*) exit 2 ;;
 esac
 request_result="/tmp/goodreads-annotation-result-$request_id.log"
+
+desired_count="$(sed -n 's/^desired_count=//p' "$payload" | sed -n '1p')"
+retry_count="$(sed -n 's/^retry_count=//p' "$payload" | sed -n '1p')"
+trigger="$(sed -n 's/^trigger=//p' "$payload" | sed -n '1p')"
+case "$desired_count" in
+    ''|*[!0-9]*) exit 2 ;;
+esac
+case "$retry_count" in
+    ''|*[!0-9]*) retry_count=0 ;;
+esac
+case "$trigger" in
+    ''|*[!a-z0-9_]*) trigger=unknown ;;
+esac
+note_count="$(awk -F= '/^desired\.[0-9]+\.note_hex=./ { count++ } END { print count + 0 }' "$payload")"
+
+receipt_value() {
+    key="$1"
+    sed -n "s/^$key=//p" "$RECEIPT_DIR/$asin" 2>/dev/null | sed -n '1p'
+}
+
+write_receipt() {
+    receipt_state="$1"
+    receipt_result="${2:-}"
+    receipt_reason="${3:-}"
+    now="$(date +%s)"
+    saved_at="$(receipt_value saved_at)"
+    waiting_at="$(receipt_value waiting_at)"
+    queued_at="$(receipt_value queued_at)"
+    if [ "$receipt_state" = "saved_locally" ]; then
+        saved_at="$now"
+        waiting_at=""
+        queued_at=""
+    else
+        [ -n "$saved_at" ] || saved_at="$now"
+    fi
+    [ "$receipt_state" = "waiting_native" ] && waiting_at="$now"
+    [ "$receipt_state" = "queued_amazon" ] && queued_at="$now"
+
+    failed_stage=""
+    local_verified="unavailable"
+    native_notified="unavailable"
+    journal_lane="unavailable"
+    upload_requested="unavailable"
+    sync_enqueued="unavailable"
+    if [ -n "$receipt_result" ] && [ -r "$receipt_result" ]; then
+        failed_stage="$(sed -n 's/^failed_stage=//p' "$receipt_result" | sed -n '1p')"
+        local_verified="$(sed -n 's/^local_verified=//p' "$receipt_result" | sed -n '1p')"
+        native_notified="$(sed -n 's/^native_notified=//p' "$receipt_result" | sed -n '1p')"
+        upload_requested="$(sed -n 's/^native_cloud_queued=//p' "$receipt_result" | sed -n '1p')"
+        sync_enqueued="$(sed -n 's/^sync_enqueued=//p' "$receipt_result" | sed -n '1p')"
+        if grep -Fqx 'ksdk_synced=true' "$receipt_result"; then
+            journal_lane="ksdk"
+        elif grep -Fqx 'legacy_journaled=true' "$receipt_result"; then
+            journal_lane="legacy"
+        fi
+    fi
+    [ -n "$receipt_reason" ] && failed_stage="$receipt_reason"
+    case "$failed_stage" in
+        ''|*[!a-z0-9_]*) failed_stage="none" ;;
+    esac
+    case "$local_verified" in true|false|unavailable) ;; *) local_verified=unavailable ;; esac
+    case "$native_notified" in true|false|unavailable) ;; *) native_notified=unavailable ;; esac
+    case "$upload_requested" in true|false|unavailable) ;; *) upload_requested=unavailable ;; esac
+    case "$sync_enqueued" in true|false|unavailable) ;; *) sync_enqueued=unavailable ;; esac
+
+    if ! mkdir -p "$RECEIPT_DIR" || ! chmod 0700 "$RECEIPT_DIR"; then
+        return 1
+    fi
+    receipt_temp="$RECEIPT_DIR/$asin.$$"
+    if ! printf '%s\n' \
+        'version=1' \
+        "asin=$asin" \
+        "state=$receipt_state" \
+        "updated_at=$now" \
+        "saved_at=$saved_at" \
+        "waiting_at=$waiting_at" \
+        "queued_at=$queued_at" \
+        "desired_count=$desired_count" \
+        "note_count=$note_count" \
+        "retry_count=$retry_count" \
+        "retry_reason=$failed_stage" \
+        'agent_generation=27' \
+        "trigger=$trigger" \
+        "local_verified=$local_verified" \
+        "native_notified=$native_notified" \
+        "journal_lane=$journal_lane" \
+        "upload_requested=$upload_requested" \
+        "sync_enqueued=$sync_enqueued" \
+        'cloud_observed=unavailable' >"$receipt_temp"; then
+        rm -f "$receipt_temp"
+        return 1
+    fi
+    chmod 0600 "$receipt_temp"
+    mv -f "$receipt_temp" "$RECEIPT_DIR/$asin"
+}
 
 if ! mkdir -p "$STATE_DIR"; then
     exit 4
@@ -139,12 +239,16 @@ pending_candidate="/tmp/goodreads-annotation-pending-$$"
 if ! cp "$payload" "$pending_candidate" || ! chmod 0600 "$pending_candidate"; then
     exit 8
 fi
+if ! write_receipt saved_locally; then
+    exit 8
+fi
 
 # KOReader and this helper run as root, but Amazon's framework JVM runs under a
 # firmware-specific account. Resolve its numeric identity from /proc instead of
 # assuming passwd/group names. Java reports EACCES here as FileNotFoundException,
 # which otherwise looks like an attach timing failure.
 if ! chown "$framework_uid:$framework_gid" "$payload" || ! chmod 0600 "$payload"; then
+    write_receipt failed "" transfer_payload || true
     exit 9
 fi
 
@@ -156,6 +260,7 @@ if [ ! -x "$LIPC_SET_PROP" ] \
         >/dev/null 2>&1 \
     || ! "$LIPC_SET_PROP" "$SHADOW_SYNC_CONTROLLER" "$KSDK_SHADOW_SYNC_PROPERTY" 1 \
         >/dev/null 2>&1; then
+    write_receipt failed "" enable_sync_lanes || true
     exit 9
 fi
 
@@ -164,6 +269,7 @@ if ! "$JAVA_BIN" --add-modules jdk.attach \
     -cp "$LAUNCHER_CLASSES" \
     AttachLauncher "$framework_pid" "$AGENT_JAR" "$payload" \
     >"$ATTACH_LOG" 2>&1; then
+    write_receipt failed "" attach_agent || true
     exit 6
 fi
 
@@ -184,6 +290,7 @@ done
 
 if ! grep -Fqx "asin=$asin" "$request_result" \
     || ! grep -Fqx "request_id=$request_id" "$request_result"; then
+    write_receipt failed "" wait_for_result || true
     exit 7
 fi
 
@@ -230,6 +337,7 @@ if ! grep -Fqx 'success=true' "$request_result"; then
     if grep -Fqx 'failed_stage=wait_for_active_book' "$request_result"; then
         pending_temp="$PENDING_DIR/$asin.$$"
         if ! mkdir -p "$PENDING_DIR" \
+            || ! chmod 0700 "$PENDING_DIR" \
             || ! mv -f "$pending_candidate" "$pending_temp" \
             || ! mv -f "$pending_temp" "$PENDING_DIR/$asin"; then
             rm -f "$pending_temp"
@@ -237,10 +345,13 @@ if ! grep -Fqx 'success=true' "$request_result"; then
         fi
         pending_candidate=""
         chmod 0600 "$PENDING_DIR/$asin"
+        write_receipt waiting_native "$request_result" || exit 8
         printf '%s\n' 'pending_sync=true' >>"$PUBLISHED_RESULT"
         if [ -x "$PENDING_WATCHER" ]; then
             "$PENDING_WATCHER" </dev/null >/dev/null 2>&1 &
         fi
+    else
+        write_receipt failed "$request_result" || exit 8
     fi
     exit 7
 fi
@@ -252,5 +363,8 @@ if ! mv -f "$state_temp" "$state_file"; then
     exit 8
 fi
 state_temp=""
+if ! write_receipt queued_amazon "$request_result"; then
+    exit 8
+fi
 
 exit 0
