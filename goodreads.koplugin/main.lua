@@ -22,11 +22,15 @@ local ACTION_READING = "com.amazon.home.actions.goodread_reading"
 local ACTION_READ = "com.amazon.home.actions.goodread_read"
 local PROGRESS_HELPER = "/mnt/us/koreader/plugins/goodreads.koplugin/bin/sync-progress"
 local ANNOTATION_HELPER = "/mnt/us/koreader/plugins/goodreads.koplugin/bin/sync-annotations"
+local RECEIPT_HELPER = "/mnt/us/koreader/plugins/goodreads.koplugin/bin/manage-sync-receipts"
 local KINDLE_HELPER_PATHS = {
     "/mnt/us/koreader/plugins/kindle.koplugin/kindle-helper",
     "/mnt/us/koreader/plugins/kindle.koplugin/bin/kindle-helper",
 }
 local ANNOTATION_STATE_DIR = "/mnt/us/koreader/settings/goodreads_native_annotations"
+local ANNOTATION_PENDING_DIR = "/mnt/us/koreader/settings/goodreads_native_annotations_pending"
+local SYNC_RECEIPT_DIR = "/mnt/us/koreader/settings/goodreads_native_sync_receipts"
+local SUPPORT_BUNDLE_FILE = "/mnt/us/koreader/settings/goodreads_native_support.txt"
 local RATING_HELPER = "/mnt/us/koreader/plugins/goodreads.koplugin/bin/sync-rating"
 local RATING_RESULT_PREFIX = "/tmp/goodreads-rating-result"
 local PROGRESS_RESULT_FILE = "/tmp/goodreads-progress-result.log"
@@ -78,6 +82,27 @@ local ANNOTATION_RESULT_KEYS = {
     legacy_cloud_deletes = true,
     book_source = true,
     sync_enqueued = true,
+}
+local SYNC_RECEIPT_KEYS = {
+    version = true,
+    asin = true,
+    state = true,
+    updated_at = true,
+    saved_at = true,
+    waiting_at = true,
+    queued_at = true,
+    desired_count = true,
+    note_count = true,
+    retry_count = true,
+    retry_reason = true,
+    agent_generation = true,
+    trigger = true,
+    local_verified = true,
+    native_notified = true,
+    journal_lane = true,
+    upload_requested = true,
+    sync_enqueued = true,
+    cloud_observed = true,
 }
 local DEBUG_FIELD_ORDER = {
     "trigger",
@@ -406,6 +431,29 @@ local function readFirstLine(path)
     local value = file:read("*l")
     file:close()
     return value
+end
+
+local function formatReceiptTime(value)
+    local timestamp = tonumber(value)
+    if not timestamp or timestamp < 1 then
+        return _("not recorded")
+    end
+    return os.date("%Y-%m-%d %H:%M", timestamp)
+end
+
+local function receiptEnum(value, allowed, fallback)
+    if type(value) == "string" and allowed[value] then
+        return value
+    end
+    return fallback
+end
+
+local function receiptCount(value)
+    local count = tonumber(value)
+    if not count or count < 0 or count > 100000 or count ~= math.floor(count) then
+        return "0"
+    end
+    return tostring(count)
 end
 
 local function safeDebugValue(value)
@@ -745,6 +793,8 @@ function Goodreads:startAnnotationReconcile(snapshot)
     payload:write("version=1\n")
     payload:write("asin=", asin, "\n")
     payload:write("request_id=", request_id, "\n")
+    payload:write("retry_count=", tostring(snapshot.attempt or 0), "\n")
+    payload:write("trigger=", tostring(trigger or "unknown"), "\n")
     payload:write("native_path_hex=", hexEncode(native_path), "\n")
     payload:write("desired_count=", tostring(#desired), "\n")
     for index, item in ipairs(desired) do
@@ -1798,6 +1848,10 @@ function Goodreads:showDiagnostics()
         and tonumber(readFirstLine(PROGRESS_STATE_DIR .. "/" .. asin))
         or nil
     local native = readKeyValueFile(PROGRESS_RESULT_FILE, PROGRESS_RESULT_KEYS)
+    local receipt = isAsin(asin)
+        and readKeyValueFile(SYNC_RECEIPT_DIR .. "/" .. asin, SYNC_RECEIPT_KEYS)
+        or nil
+    local pending = isAsin(asin) and isReadable(ANNOTATION_PENDING_DIR .. "/" .. asin)
 
     local lines = {
         _("Goodreads native sync diagnostics"),
@@ -1905,6 +1959,87 @@ function Goodreads:showDiagnostics()
         and _("Annotation sync: enabled for converted Kindle books with a position map")
         or _("Annotation sync: disabled"))
 
+    table.insert(lines, "")
+    table.insert(lines, _("Durable annotation receipt"))
+    if receipt and receipt.asin == asin then
+        local effective_state = pending and "waiting_native" or receiptEnum(receipt.state, {
+            saved_locally = true,
+            waiting_native = true,
+            queued_amazon = true,
+            cloud_observed = true,
+            failed = true,
+            discarded = true,
+        }, "unknown")
+        local journal_lane = receiptEnum(receipt.journal_lane, {
+            legacy = true,
+            ksdk = true,
+            unavailable = true,
+        }, "unavailable")
+        local local_verified = receiptEnum(receipt.local_verified, {
+            ["true"] = true,
+            ["false"] = true,
+            unavailable = true,
+        }, "unavailable")
+        local upload_requested = receiptEnum(receipt.upload_requested, {
+            ["true"] = true,
+            ["false"] = true,
+            unavailable = true,
+        }, "unavailable")
+        local sync_enqueued = receiptEnum(receipt.sync_enqueued, {
+            ["true"] = true,
+            ["false"] = true,
+            unavailable = true,
+        }, "unavailable")
+        local retry_reason = receiptEnum(receipt.retry_reason, {
+            none = true,
+            wait_for_active_book = true,
+            native_sync_enqueue = true,
+            validate_payload = true,
+            transfer_payload = true,
+            enable_sync_lanes = true,
+            attach_agent = true,
+            wait_for_result = true,
+            user_discarded = true,
+        }, "unavailable")
+        local agent_generation = receipt.agent_generation == "27" and "27" or "unknown"
+        local state_label = ({
+            saved_locally = _("saved locally"),
+            waiting_native = _("waiting for native reader"),
+            queued_amazon = _("queued to Amazon"),
+            cloud_observed = _("cloud observed"),
+            failed = _("failed; retry available"),
+            discarded = _("pending snapshot discarded"),
+        })[effective_state] or _("unknown")
+        table.insert(lines, string.format(_("State: %s"), state_label))
+        table.insert(lines, string.format(
+            _("Snapshot: %s annotation(s), %s note(s); saved %s"),
+            receiptCount(receipt.desired_count),
+            receiptCount(receipt.note_count),
+            formatReceiptTime(receipt.saved_at)
+        ))
+        table.insert(lines, string.format(
+            _("Native lane: %s; local readback %s; upload request %s; system queue %s"),
+            journal_lane,
+            local_verified,
+            upload_requested,
+            sync_enqueued
+        ))
+        table.insert(lines, string.format(
+            _("Retry: %s attempt(s); reason %s; agent %s"),
+            receiptCount(receipt.retry_count),
+            retry_reason,
+            agent_generation
+        ))
+        table.insert(lines, string.format(
+            _("Cloud observation: %s"),
+            receipt.cloud_observed == "true" and _("verified") or _("unavailable")
+        ))
+    elseif isAsin(asin) then
+        table.insert(lines, _("No durable annotation receipt exists for this book yet."))
+    else
+        table.insert(lines, _("Open an ASIN-backed book to view its receipt."))
+    end
+
     if self.settings.debug_enabled then
         table.insert(lines, "")
         table.insert(lines, DEBUG_LOG_FILE)
@@ -1914,6 +2049,88 @@ function Goodreads:showDiagnostics()
         text = table.concat(lines, "\n"),
         timeout = 15,
     }))
+end
+
+function Goodreads:getReceiptAsin()
+    local reader = self.ui and self.ui.document and self.ui
+    local asin = reader and getBookAsin(reader) or self.settings.last_synced_asin
+    return isAsin(asin) and asin or nil
+end
+
+function Goodreads:retryPendingAnnotations()
+    local asin = self:getReceiptAsin()
+    if not asin or not isReadable(ANNOTATION_PENDING_DIR .. "/" .. asin) then
+        UIManager:show(InfoMessage:new({
+            text = _("No pending annotation snapshot exists for the selected book."),
+            timeout = 4,
+        }))
+        return false
+    end
+    os.execute(
+        util.shell_escape({ RECEIPT_HELPER, "retry", asin }) .. " >/dev/null 2>&1"
+    )
+    UIManager:show(InfoMessage:new({
+        text = _("Pending annotation retry requested."),
+        timeout = 3,
+    }))
+    return true
+end
+
+function Goodreads:showDiscardPendingDialog()
+    local asin = self:getReceiptAsin()
+    if not asin or not isReadable(ANNOTATION_PENDING_DIR .. "/" .. asin) then
+        UIManager:show(InfoMessage:new({
+            text = _("No pending annotation snapshot exists for the selected book."),
+            timeout = 4,
+        }))
+        return
+    end
+
+    local dialog
+    dialog = ButtonDialog:new({
+        title = _("Discard the pending annotation snapshot?\nThis does not delete annotations already saved in KOReader or Kindle."),
+        title_align = "center",
+        width_factor = 0.9,
+        buttons = {
+            {
+                {
+                    text = _("Discard pending"),
+                    callback = function()
+                        UIManager:close(dialog)
+                        local status = os.execute(
+                            util.shell_escape({ RECEIPT_HELPER, "discard", asin })
+                                .. " >/dev/null 2>&1"
+                        )
+                        UIManager:show(InfoMessage:new({
+                            text = status == 0 and _("Pending snapshot discarded.")
+                                or _("Could not discard the pending snapshot."),
+                            timeout = 4,
+                        }))
+                    end,
+                },
+                {
+                    text = _("Cancel"),
+                    callback = function()
+                        UIManager:close(dialog)
+                    end,
+                },
+            },
+        },
+    })
+    UIManager:show(dialog)
+end
+
+function Goodreads:exportRedactedSupportBundle()
+    local status = os.execute(
+        util.shell_escape({ RECEIPT_HELPER, "export" }) .. " >/dev/null 2>&1"
+    )
+    UIManager:show(InfoMessage:new({
+        text = status == 0
+            and string.format(_("Redacted support summary saved to:\n%s"), SUPPORT_BUNDLE_FILE)
+            or _("Could not create the support summary."),
+        timeout = 7,
+    }))
+    return status == 0
 end
 
 function Goodreads:clearDebugLog()
@@ -2106,6 +2323,37 @@ function Goodreads:addToMainMenu(menu_items)
                 callback = function()
                     self:showDiagnostics()
                 end,
+            },
+            {
+                text = _("Sync receipts and recovery"),
+                sub_item_table = {
+                    {
+                        text = _("Retry pending annotations"),
+                        enabled_func = function()
+                            local asin = self:getReceiptAsin()
+                            return asin and isReadable(ANNOTATION_PENDING_DIR .. "/" .. asin)
+                        end,
+                        callback = function()
+                            self:retryPendingAnnotations()
+                        end,
+                    },
+                    {
+                        text = _("Discard pending annotations…"),
+                        enabled_func = function()
+                            local asin = self:getReceiptAsin()
+                            return asin and isReadable(ANNOTATION_PENDING_DIR .. "/" .. asin)
+                        end,
+                        callback = function()
+                            self:showDiscardPendingDialog()
+                        end,
+                    },
+                    {
+                        text = _("Export redacted support summary"),
+                        callback = function()
+                            self:exportRedactedSupportBundle()
+                        end,
+                    },
+                },
             },
             {
                 text = _("Clear debug log"),

@@ -15,7 +15,7 @@ package.preload["ui/widget/infomessage"] = simpleWidget
 package.preload["ui/widget/buttondialog"] = simpleWidget
 package.preload["ui/uimanager"] = function()
     return {
-        show = function(message)
+        show = function(_, message)
             table.insert(shown_messages, message)
         end,
         close = function() end,
@@ -409,6 +409,56 @@ end
 suspend:onSuspend()
 assert(suspend_progress == 1, "suspend should capture progress immediately")
 assert(suspend_annotations == 1, "suspend should capture annotations before sleeping")
+
+-- Durable receipt diagnostics must survive outside session state, overlay a
+-- real pending file, and reject arbitrary values rather than displaying them.
+local original_open = io.open
+local receipt_path = "/mnt/us/koreader/settings/goodreads_native_sync_receipts/B0FLB24198"
+local pending_path = "/mnt/us/koreader/settings/goodreads_native_annotations_pending/B0FLB24198"
+io.open = function(path, mode)
+    if path == receipt_path then
+        local receipt_lines = {
+            "version=1",
+            "asin=B0FLB24198",
+            "state=queued_amazon",
+            "saved_at=1786885000",
+            "desired_count=2",
+            "note_count=1",
+            "retry_count=3",
+            "retry_reason=private text must not be displayed",
+            "agent_generation=27",
+            "local_verified=true",
+            "journal_lane=legacy",
+            "upload_requested=true",
+            "sync_enqueued=true",
+            "cloud_observed=unavailable",
+        }
+        return {
+            lines = function()
+                local index = 0
+                return function()
+                    index = index + 1
+                    return receipt_lines[index]
+                end
+            end,
+            close = function() end,
+        }
+    end
+    if path == pending_path and mode == "rb" then
+        return { close = function() end }
+    end
+    return original_open(path, mode)
+end
+shown_messages = {}
+active.ui = reader
+reader.document = { virtual_path = "KINDLE_VIRTUAL://B0FLB24198/book.epub" }
+active:showDiagnostics()
+local receipt_message = shown_messages[#shown_messages] and shown_messages[#shown_messages].text or ""
+assert(receipt_message:match("Durable annotation receipt"), "diagnostics must include durable receipts")
+assert(receipt_message:match("waiting for native reader"), "pending state must override a stale queued receipt")
+assert(receipt_message:match("Cloud observation: unavailable"), "upload must not imply cloud observation")
+assert(not receipt_message:match("private text"), "receipt diagnostics must reject arbitrary values")
+io.open = original_open
 
 os.execute = original_execute
 

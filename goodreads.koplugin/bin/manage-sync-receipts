@@ -1,0 +1,163 @@
+#!/bin/sh
+
+# Read and manage durable, text-free annotation sync receipts. This helper
+# never reads annotation payload content beyond checking whether a pending file
+# exists, and support exports replace ASINs with anonymous sequence numbers.
+
+set -u
+
+PLUGIN_DIR="${GOODREADS_PLUGIN_DIR:-/mnt/us/koreader/plugins/goodreads.koplugin}"
+SETTINGS_DIR="${GOODREADS_SETTINGS_DIR:-/mnt/us/koreader/settings}"
+RECEIPT_DIR="$SETTINGS_DIR/goodreads_native_sync_receipts"
+PENDING_DIR="$SETTINGS_DIR/goodreads_native_annotations_pending"
+WATCHER="$PLUGIN_DIR/bin/watch-pending-annotations"
+SUPPORT_FILE="$SETTINGS_DIR/goodreads_native_support.txt"
+LOCK_ROOT="${GOODREADS_LOCK_DIR:-/tmp}"
+
+is_asin() {
+    printf '%s\n' "$1" | grep -Eq '^B[A-Z0-9]{9}$'
+}
+
+receipt_value() {
+    key="$1"
+    file="$2"
+    sed -n "s/^$key=//p" "$file" 2>/dev/null | sed -n '1p'
+}
+
+print_status() {
+    asin="$1"
+    receipt="$RECEIPT_DIR/$asin"
+    if [ -r "$receipt" ]; then
+        while IFS= read -r line; do
+            case "$line" in
+                version=*|asin=*|state=*|updated_at=*|saved_at=*|waiting_at=*|queued_at=*|desired_count=*|note_count=*|retry_count=*|retry_reason=*|agent_generation=*|trigger=*|local_verified=*|native_notified=*|journal_lane=*|upload_requested=*|sync_enqueued=*|cloud_observed=*)
+                    printf '%s\n' "$line"
+                    ;;
+            esac
+        done <"$receipt"
+    else
+        printf '%s\n' 'state=none'
+    fi
+    if [ -r "$PENDING_DIR/$asin" ]; then
+        printf '%s\n' 'pending_present=true' 'effective_state=waiting_native'
+    else
+        printf '%s\n' 'pending_present=false'
+    fi
+}
+
+discard_pending() {
+    asin="$1"
+    pending="$PENDING_DIR/$asin"
+    book_lock="$LOCK_ROOT/goodreads-annotation-book-$asin.lock"
+    if ! mkdir "$book_lock" 2>/dev/null; then
+        printf '%s\n' 'discarded=false' 'reason=sync_in_progress'
+        return 1
+    fi
+    if [ ! -f "$pending" ]; then
+        rmdir "$book_lock" 2>/dev/null || true
+        printf '%s\n' 'discarded=false' 'reason=no_pending_snapshot'
+        return 1
+    fi
+    if ! rm -f "$pending"; then
+        rmdir "$book_lock" 2>/dev/null || true
+        return 1
+    fi
+    now="$(date +%s)"
+    if ! mkdir -p "$RECEIPT_DIR"; then
+        rmdir "$book_lock" 2>/dev/null || true
+        return 1
+    fi
+    chmod 0700 "$RECEIPT_DIR"
+    receipt="$RECEIPT_DIR/$asin"
+    temp="$receipt.$$"
+    desired_count="$(receipt_value desired_count "$receipt")"
+    note_count="$(receipt_value note_count "$receipt")"
+    saved_at="$(receipt_value saved_at "$receipt")"
+    agent_generation="$(receipt_value agent_generation "$receipt")"
+    [ -n "$desired_count" ] || desired_count=0
+    [ -n "$note_count" ] || note_count=0
+    [ -n "$saved_at" ] || saved_at="$now"
+    [ -n "$agent_generation" ] || agent_generation=unknown
+    printf '%s\n' \
+        'version=1' "asin=$asin" 'state=discarded' "updated_at=$now" \
+        "saved_at=$saved_at" 'waiting_at=' 'queued_at=' \
+        "desired_count=$desired_count" "note_count=$note_count" \
+        'retry_count=0' 'retry_reason=user_discarded' \
+        "agent_generation=$agent_generation" 'trigger=manual_discard' \
+        'local_verified=unavailable' 'native_notified=unavailable' \
+        'journal_lane=unavailable' 'upload_requested=unavailable' \
+        'sync_enqueued=unavailable' 'cloud_observed=unavailable' >"$temp" || {
+            rmdir "$book_lock" 2>/dev/null || true
+            return 1
+        }
+    chmod 0600 "$temp"
+    if ! mv -f "$temp" "$receipt"; then
+        rmdir "$book_lock" 2>/dev/null || true
+        return 1
+    fi
+    rmdir "$book_lock" 2>/dev/null || true
+    printf '%s\n' 'discarded=true'
+}
+
+export_support() {
+    mkdir -p "$SETTINGS_DIR" || return 1
+    temp="$SUPPORT_FILE.$$"
+    now="$(date +%s)"
+    version="unknown"
+    if [ -r "$PLUGIN_DIR/../VERSION" ]; then
+        version="$(sed -n '1p' "$PLUGIN_DIR/../VERSION")"
+    elif [ -r "$PLUGIN_DIR/VERSION" ]; then
+        version="$(sed -n '1p' "$PLUGIN_DIR/VERSION")"
+    fi
+    case "$version" in *[!0-9A-Za-z._-]*) version=unknown ;; esac
+    {
+        printf '%s\n' 'support_schema=1' "generated_at=$now" "plugin_version=$version"
+        count=0
+        for receipt in "$RECEIPT_DIR"/B?????????; do
+            [ -r "$receipt" ] || continue
+            count=$((count + 1))
+            printf '\n[book_%03d]\n' "$count"
+            for key in state updated_at saved_at waiting_at queued_at desired_count note_count retry_count retry_reason agent_generation trigger local_verified native_notified journal_lane upload_requested sync_enqueued cloud_observed; do
+                value="$(receipt_value "$key" "$receipt")"
+                case "$value" in *[!0-9A-Za-z._-]*) value=redacted ;; esac
+                printf '%s=%s\n' "$key" "${value:-unknown}"
+            done
+            if [ -r "$PENDING_DIR/$(basename "$receipt")" ]; then
+                printf '%s\n' 'pending_present=true'
+            else
+                printf '%s\n' 'pending_present=false'
+            fi
+        done
+        printf '\nreceipt_count=%d\n' "$count"
+    } >"$temp" || return 1
+    chmod 0600 "$temp"
+    mv -f "$temp" "$SUPPORT_FILE" || return 1
+    printf '%s\n' "$SUPPORT_FILE"
+}
+
+action="${1:-}"
+case "$action" in
+    status)
+        [ "$#" -eq 2 ] && is_asin "$2" || exit 2
+        print_status "$2"
+        ;;
+    retry)
+        [ "$#" -eq 2 ] && is_asin "$2" || exit 2
+        if [ ! -r "$PENDING_DIR/$2" ]; then
+            printf '%s\n' 'retry_requested=false' 'reason=no_pending_snapshot'
+            exit 1
+        fi
+        [ -x "$WATCHER" ] || exit 3
+        "$WATCHER" --once "$2" </dev/null >/dev/null 2>&1 &
+        printf '%s\n' 'retry_requested=true'
+        ;;
+    discard)
+        [ "$#" -eq 2 ] && is_asin "$2" || exit 2
+        discard_pending "$2"
+        ;;
+    export)
+        [ "$#" -eq 1 ] || exit 2
+        export_support
+        ;;
+    *) exit 2 ;;
+esac

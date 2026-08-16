@@ -98,11 +98,14 @@ then reads the firmware's runtime feature flags. KSDK-enabled releases use the
 KSDK annotation proxy; legacy releases create native `JournalingService`
 entries for the exact active book and ask `WhisperSyncV1` to upload
 them. The optional WhisperStore snapshot bridge is used only when enabled. A transient
-mode-0600 payload carries note text. Ownership is transferred from KOReader's
+payload carries note text. Ownership is transferred from KOReader's
 root process to the framework JVM's dynamically resolved UID/GID, then the versioned agent removes it
 immediately after loading, with bounded fallback cleanup by the helper; persistent plugin
 state contains coordinate keys only. Diagnostics expose only counts and
-sanitized success/failure stages. The agent closes and reopens the book before
+sanitized success/failure stages. Requested POSIX modes are not a reliable
+privacy boundary on Kindle's FUSE-backed `/mnt/us`; physical-storage and root
+access are therefore in the same trust boundary while a snapshot is pending.
+The agent closes and reopens the book before
 reporting local verification. Before the agent write, the shell enables both
 the legacy journal and KSDK shadow-mode lanes. After local, proxy, native
 journal, and upload-request stages succeed, it invokes
@@ -116,6 +119,23 @@ root-only pending queue. One lock-protected watcher blocks on app manager
 `appStarted` events and replays pending books when native KPP becomes active.
 Transient native failures retry up to three times; a newer same-book snapshot
 cancels an older retry.
+
+Each shell reconciliation atomically replaces a text-free per-ASIN receipt in
+`goodreads_native_sync_receipts`. Receipt transitions distinguish
+`saved_locally`, `waiting_native`, `queued_amazon`, `failed`, and a manual
+`discarded` state. They retain only counts, timestamps, bounded retry metadata,
+agent generation, capability lane, and verification booleans. The
+`cloud_observed` field remains `unavailable` unless a future independent
+server-readback implementation verifies it; a native upload acknowledgement
+alone cannot set it.
+
+The receipt manager can replay an existing pending snapshot, remove only that
+pending file after UI confirmation, or create a redacted support summary. The
+summary enumerates books with local sequence labels rather than ASINs and does
+not open pending payloads, preventing annotation text from entering support
+artifacts. The helper requests restrictive modes, but `/mnt/us` is FUSE-backed
+on Kindle and may not enforce POSIX mode bits; privacy comes from excluding
+annotation text and identifiers from the exported summary.
 
 ## Upgrade behavior
 
