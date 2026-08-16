@@ -66,13 +66,17 @@ Success: repeated launch requests cannot produce two independent reader trees.
 
 ### P1 — Background native-journal experiment
 
-- Determine whether an exact `JournaledBook` can be constructed from content
-  catalog metadata while the native reader is inactive.
-- Submit a canary in an isolated test book only after dry-run capability checks
-  pass.
-- Require native journal acknowledgement, WhisperSync enqueue acknowledgement,
-  and later native/cloud observation before treating the path as supported.
-- Maintain a firmware capability allowlist and an immediate kill switch.
+- Firmware 5.19.5 result: rejected. An exact detached book and journal entry
+  could be constructed, and both create and delete uploads reported success,
+  but the canary never appeared in the local native annotation store after the
+  exact book was opened.
+- Keep the experiment isolated from release packages and retain the production
+  queue-on-native-open design.
+- Revisit only if a firmware-specific notification payload or supported API can
+  make the journaled canary observable locally and in Amazon Notebook, followed
+  by a verified deletion in both places.
+- Require a firmware capability allowlist and immediate kill switch before any
+  future opt-in test.
 
 The experiment and stop conditions are documented in
 `experiments/background-annotation-sync/README.md`.

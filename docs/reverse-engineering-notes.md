@@ -129,8 +129,21 @@ factory and journal-entry factory were also present. KSDK and WhisperStore
 remained disabled, so any background-write canary on this firmware must target
 the legacy journal lane.
 
-This is evidence of structural availability, not durability. The probe did not
-create, edit, delete, journal, or upload an annotation. A production background
-path remains blocked until a disposable canary can be observed both in the
-native reader and in the cloud, then deleted and observed absent through the
-same path.
+This was evidence of structural availability, not durability. A later
+confirmation-gated canary used an exact detached local KFX identity and a
+native-validated, non-colliding range. The legacy journal accepted the create
+and matching delete, and `WhisperSyncV1` reported successful journal uploads for
+both operations. KOReader's real metadata and queued snapshot were unchanged by
+the create; the real queued work was later replayed normally when the native
+book became active.
+
+The canary itself was absent from the local native annotation store immediately
+after opening the exact book and after a bounded refresh wait. Firmware logs
+also showed that the experimental `background-canary` annotation-change reason
+was rejected as invalid JSON. Direct Amazon Notebook observation was not
+available during the run, so cloud appearance or deletion is not claimed.
+
+This satisfies the experiment's stop condition: upload acceptance without
+local observation is not a supported background sync path. Firmware 5.19.5
+must retain the production queue-on-native-open behavior. The experimental
+harness remains excluded from release packages.

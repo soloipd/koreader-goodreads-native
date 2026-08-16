@@ -56,8 +56,39 @@ mutation_attempted=false
 probe_ok=true
 ```
 
-This supports advancing to an isolated legacy-journal canary. It does not
-justify enabling background writes in the production plugin.
+This supported advancing to an isolated legacy-journal canary. The completed
+canary result below does not justify enabling background writes in the
+production plugin.
+
+### Canary result on firmware 5.19.5
+
+The reversible write test ran with KOReader active and the exact native book
+closed. One candidate range was rejected during native position validation; a
+second non-colliding range passed without mutating data. Before the write, the
+test saved private local backups and recorded counts and hashes for KOReader's
+real metadata and pending snapshot.
+
+The legacy journal accepted both the synthetic create and its matching delete.
+`WhisperSyncV1` was requested after each operation, and the firmware log later
+reported `Journal uploaded successfully` for both corresponding upload runs.
+The create did not change KOReader's metadata or pending snapshot. Opening the
+exact local KFX then consumed the real pending snapshot successfully, while a
+read-only native observer found zero annotations at the canary coordinate. The
+result stayed zero after a bounded refresh wait. The matching delete was then
+accepted and uploaded, and a final native observation again found zero canary
+matches.
+
+The firmware also logged that `background-canary` was not valid JSON when the
+experimental annotation-change notification was handled. This is separate
+from the successful journal-upload messages and may explain why the journaled
+create never appeared in the local native store.
+
+The stop condition “uploaded but not visible locally” therefore fired. Direct
+Amazon Notebook observation was unavailable during this run, so server-side
+appearance and deletion were not claimed. The decisive local failure means the
+background path remains rejected on firmware 5.19.5. Production must continue
+to coalesce inactive work and replay it only when the exact local native book
+is active.
 
 ## Canary write design
 
@@ -81,6 +112,9 @@ native position/export object. It never calls the detached annotation manager.
 The exact in-memory canary object is retained inside the framework JVM and must
 be reused for deletion; a framework restart between create and delete is a stop
 condition requiring manual cleanup through the native reader.
+
+The harness remains in this draft experiment only so the negative result is
+reproducible. It is not part of the plugin ZIP or any production code path.
 
 ## Stop conditions
 
