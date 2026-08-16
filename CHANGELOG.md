@@ -29,6 +29,9 @@ All notable changes to this project are documented here. The project follows
   block the pre-import snapshot instead of risking stale native deletions.
 - The same fail-closed ordering applies to suspend, close, manual sync, and
   crash-recovered outboxes, preventing lifecycle races around ReaderReady.
+- Annotation handoff repairs a stale `kindle.koplugin` source path from
+  Kindle's current content catalog. Only one readable, visible, non-archived,
+  fully local ebook row is accepted; ambiguous catalog results fail closed.
 
 ## [0.8.0] - 2026-08-16
 

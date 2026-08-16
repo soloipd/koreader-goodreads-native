@@ -293,6 +293,107 @@ assert(catalog_plugin.last_checkpoint.resolver == "content_catalog", "catalog fa
 assert(commands[#commands]:match("sync%-progress B099999999 46"), "catalog fallback must queue the resolved ASIN")
 io.popen = original_popen
 
+-- Annotation handoff must repair a stale kindle.koplugin source_path from the
+-- current catalog. It may never guess when more than one readable local row
+-- survives the strict catalog filter.
+local function testHex(value)
+    return (value:gsub(".", function(character)
+        return string.format("%02x", string.byte(character))
+    end))
+end
+local catalog_native_path = "/mnt/us/documents/current local copy.kfx"
+local stale_native_path = "/mnt/us/documents/removed copy.kfx"
+package.loaded["lua/readerui_ext"] = {
+    virtual_library = {
+        getVirtualPath = function(_, value) return value end,
+        getBook = function()
+            return {
+                cde_key = "B099999999",
+                source_path = stale_native_path,
+            }
+        end,
+    },
+}
+local annotation_catalog_reader = {
+    document = {
+        file = "/mnt/us/koreader/cache/kindle.koplugin/cc_test.epub",
+        virtual_path = "KINDLE_VIRTUAL://B099999999/book.epub",
+    },
+    annotation = {
+        annotations = {
+            { drawer = "lighten", pos0 = "/body/p[1].0", pos1 = "/body/p[1].1" },
+        },
+    },
+}
+local annotation_catalog_plugin = newPlugin(settings({ annotation_sync_enabled = true }))
+local original_catalog_open = io.open
+io.open = function(path, mode)
+    if path == catalog_native_path and mode == "rb" then
+        return { close = function() end }
+    end
+    return original_catalog_open(path, mode)
+end
+io.popen = function(command)
+    assert(command:match("SELECT DISTINCT lower%(hex%(p_location%)%)"),
+        "native path lookup must use a text-free catalog protocol")
+    assert(command:match("p_cdeKey='B099999999'"),
+        "native path lookup must use the strictly validated ASIN")
+    assert(command:match("p_isArchived,0%)=0")
+        and command:match("p_isDownloading,0%)=0")
+        and command:match("p_isVisibleInHome,1%)=1"),
+        "native path lookup must reject archived, downloading, and hidden rows")
+    local values = { testHex(catalog_native_path) }
+    return {
+        lines = function()
+            local index = 0
+            return function()
+                index = index + 1
+                return values[index]
+            end
+        end,
+        close = function() end,
+    }
+end
+local captured_catalog_snapshot = assert(
+    annotation_catalog_plugin:captureAnnotationSnapshot(
+        annotation_catalog_reader, "catalog_repair"))
+assert(captured_catalog_snapshot.native_path == catalog_native_path,
+    "annotation handoff must replace a stale mapped path with the unique local catalog path")
+
+io.open = function(path, mode)
+    if (path == catalog_native_path
+            or path == "/mnt/us/documents/second.kfx"
+            or path == stale_native_path)
+        and mode == "rb"
+    then
+        return { close = function() end }
+    end
+    return original_catalog_open(path, mode)
+end
+io.popen = function()
+    local values = {
+        testHex(catalog_native_path),
+        testHex("/mnt/us/documents/second.kfx"),
+    }
+    return {
+        lines = function()
+            local index = 0
+            return function()
+                index = index + 1
+                return values[index]
+            end
+        end,
+        close = function() end,
+    }
+end
+local ambiguous_snapshot, ambiguous_error =
+    annotation_catalog_plugin:captureAnnotationSnapshot(
+        annotation_catalog_reader, "catalog_ambiguous")
+assert(not ambiguous_snapshot and ambiguous_error == "Kindle source paths unavailable",
+    "annotation handoff must fail closed for ambiguous readable catalog rows")
+io.open = original_catalog_open
+io.popen = original_popen
+
 local scheduled_before_interval_change = #scheduled
 catalog_plugin:setProgressInterval(120)
 assert(catalog_plugin.settings.progress_interval_seconds == 120, "menu interval must persist")
