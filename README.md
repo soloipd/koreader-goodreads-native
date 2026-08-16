@@ -153,11 +153,25 @@ suspend, close, and the manual sync action. The coordinate map contains no book
 or annotation text. Rapid changes are serialized: the latest snapshot for each
 book replaces stale queued work, transient failures retry up to three times,
 and close-time snapshots can retry after the reader UI has unloaded the book.
-Each reconciliation uses Kindle's high-level ReaderSDK write path, then closes
-and reopens the native book to verify that every change is durable. Only after
-that readback succeeds does the helper enqueue Amazon's native annotation sync
-client. Diagnostics distinguish verified native storage from successful cloud
-queueing.
+Each reconciliation updates ReaderSDK's local store, explicitly sends Kindle's
+KPP annotation-change notification, and journals the same edit through
+WhisperStore. If the firmware exports the separate KSDK dual-write operation,
+the agent uses that too; this operation is absent on some Kindle releases and
+is then reported as unavailable rather than successful. These explicit steps
+are required because books
+opened by file path are not marked as native KPPReader books, so ReaderSDK
+otherwise suppresses parts of the native pipeline. The agent then closes and
+reopens the book for a local readback. Only after local verification, native
+notification, and WhisperStore acceptance does the helper enqueue native
+annotation synchronization and start WhisperSync. The helper enables the
+legacy journal and KSDK sync lanes before the write. Diagnostics report each
+stage separately.
+
+The upgrade migration removes annotations produced by the older zero-endpoint
+bug from both the local store and WhisperStore before replaying corrected
+ranges. On color-capable firmware, cloud serialization omits only the optional
+color metadata that Amazon's bridge incorrectly casts to text; native color is
+not changed.
 
 Annotation text exists only in KOReader's own metadata, a mode-0600 transient
 request under `/tmp`, and the native Kindle annotation store. Transient

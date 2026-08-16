@@ -1,0 +1,1019 @@
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileWriter;
+import java.io.PrintWriter;
+import java.lang.instrument.Instrumentation;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+
+/** Reconciles KOReader highlights with the native Kindle annotation store. */
+public final class GoodreadsAnnotationAgentV15 {
+    private GoodreadsAnnotationAgentV15() {}
+
+    public static void agentmain(String payloadPath, Instrumentation instrumentation) {
+        PrintWriter out;
+        try {
+            out = new PrintWriter(new FileWriter(resultPath(payloadPath), false));
+        } catch (Throwable ignored) {
+            return;
+        }
+
+        Object book = null;
+        boolean ownsBook = false;
+        String stage = "validate_payload";
+        Counters counters = new Counters();
+        try {
+            Properties payload = loadPayload(payloadPath);
+            String asin = requireAsin(payload.getProperty("asin"));
+            String requestId = requireRequestId(payload.getProperty("request_id"));
+            if (!payloadPath.equals("/tmp/goodreads-annotations-" + requestId + ".properties")) {
+                throw new IllegalArgumentException("request ID does not match payload path");
+            }
+            String nativePath = requireNativePath(decodeHex(payload.getProperty("native_path_hex", "")));
+            boolean repairZeroEndpoint = "true".equals(
+                payload.getProperty("repair_zero_endpoint"));
+            boolean forceCloudReplay = "true".equals(
+                payload.getProperty("force_cloud_replay"));
+            boolean purgeLegacyCloud = "true".equals(
+                payload.getProperty("purge_legacy_cloud"));
+            boolean ksdkDualWriteAvailable = "true".equals(
+                payload.getProperty("ksdk_dualwrite_available"));
+            List<Record> desired = readRecords(payload, "desired");
+            Map<String, Boolean> previous = readPrevious(payload, "previous");
+            out.println("asin=" + asin);
+            out.println("request_id=" + requestId);
+            out.println("requested=" + desired.size());
+
+            stage = "resolve_reader_sdk";
+            Class<?> framework = Class.forName("com.amazon.kindle.restricted.runtime.Framework");
+            Class<?> readerSdkType = Class.forName("com.amazon.ebook.booklet.reader.sdk.ReaderSDK");
+            Object readerSdk = framework.getMethod("getService", Class.class).invoke(null, readerSdkType);
+            if (readerSdk == null) {
+                throw new IllegalStateException("ReaderSDK unavailable");
+            }
+            Object contentSdk = readerSdk.getClass().getMethod("jE").invoke(readerSdk);
+
+            stage = "open_book";
+            Object activeBook = invokeOptional(readerSdk, "jy");
+            if (bookMatchesAsin(activeBook, asin)) {
+                book = activeBook;
+                out.println("book_source=active");
+            } else {
+                book = invokeCompatible(contentSdk, "dt", nativePath);
+                ownsBook = true;
+                out.println("book_source=detached");
+            }
+            if (book == null) {
+                throw new IllegalStateException("native book unavailable");
+            }
+
+            stage = "load_annotations";
+            Object manager = contentSdk.getClass().getMethod("xA").invoke(contentSdk);
+            Object listed = invokeCompatible(manager, "Q", book);
+            List<?> annotations = listed instanceof List ? (List<?>) listed : Collections.emptyList();
+            Map<String, Object> existing = indexAnnotations(annotations);
+
+            if (repairZeroEndpoint) {
+                stage = "repair_generation_6_annotations";
+                repairGenerationSixAnnotations(
+                    annotations, manager, readerSdk, book, desired,
+                    ksdkDualWriteAvailable, counters);
+                listed = invokeCompatible(manager, "Q", book);
+                annotations = listed instanceof List ? (List<?>) listed : Collections.emptyList();
+                existing = indexAnnotations(annotations);
+            }
+
+            if (purgeLegacyCloud) {
+                stage = "purge_generation_6_cloud_annotations";
+                purgeGenerationSixCloudAnnotations(
+                    contentSdk, book, desired, previous, counters);
+            }
+
+            stage = "reconcile_annotations";
+            Set<String> desiredKeys = new HashSet<String>();
+            for (Record record : desired) {
+                desiredKeys.add(record.rangeKey());
+                Object start = makePosition(
+                    contentSdk, book, record.startLong, record.startShort);
+                Object end = makePosition(
+                    contentSdk, book, record.endLong, record.endShort);
+                String highlightKey = typedKey(1, record.startLong, record.endLong);
+                Object highlight = existing.get(highlightKey);
+                if (highlight != null && !positionMatches(highlight, record)) {
+                    if (!invokeBoolean(manager, "g", highlight, book)) {
+                        throw new IllegalStateException("invalid native highlight repair rejected");
+                    }
+                    notifyNativeReader(readerSdk, highlight, book, "DELETE",
+                        ksdkDualWriteAvailable, counters);
+                    counters.highlightsDeleted++;
+                    counters.zeroEndpointRepairs++;
+                    existing.remove(highlightKey);
+                    highlight = null;
+                }
+                if (highlight == null) {
+                    highlight = construct(
+                        "com.amazon.ebook.booklet.reader.impl.annotation.personal.Highlight",
+                        start,
+                        end
+                    );
+                    if (!invokeBoolean(manager, "f", highlight, book)) {
+                        throw new IllegalStateException("native highlight create rejected");
+                    }
+                    notifyNativeReader(readerSdk, highlight, book, "CREATE",
+                        ksdkDualWriteAvailable, counters);
+                    syncCloudEdit(highlight, book, "CREATE", counters);
+                    existing.put(highlightKey, highlight);
+                    counters.highlightsCreated++;
+                } else {
+                    // Some Kindle content engines return persisted annotation
+                    // endpoints in the opposite order from the translated
+                    // KOReader range. Use the native object's ordering when
+                    // attaching a note so the manager accepts it.
+                    start = highlight.getClass().getMethod("jh").invoke(highlight);
+                    end = highlight.getClass().getMethod("jd").invoke(highlight);
+                    if (forceCloudReplay) {
+                        if (ksdkDualWriteAvailable) {
+                            syncKsdkEdit(readerSdk, highlight, book, "CREATE", counters);
+                        }
+                        syncCloudEdit(highlight, book, "CREATE", counters);
+                    }
+                }
+
+                String noteKey = typedKey(2, record.startLong, record.endLong);
+                Object note = existing.get(noteKey);
+                if (record.note.length() > 0) {
+                    if (note == null) {
+                        note = construct(
+                            "com.amazon.ebook.booklet.reader.impl.annotation.personal.Note",
+                            record.note,
+                            start,
+                            end
+                        );
+                        if (!invokeBoolean(manager, "f", note, book)) {
+                            throw new IllegalStateException("native note create rejected");
+                        }
+                        notifyNativeReader(readerSdk, note, book, "CREATE",
+                            ksdkDualWriteAvailable, counters);
+                        syncCloudEdit(note, book, "CREATE", counters);
+                        existing.put(noteKey, note);
+                        counters.notesCreated++;
+                    } else {
+                        String oldText = String.valueOf(note.getClass().getMethod("getText").invoke(note));
+                        if (!record.note.equals(oldText)) {
+                            note.getClass().getMethod("setText", String.class).invoke(note, record.note);
+                            if (!invokeBoolean(manager, "h", note, book)) {
+                                throw new IllegalStateException("native note update rejected");
+                            }
+                            notifyNativeReader(readerSdk, note, book, "UPDATE",
+                                ksdkDualWriteAvailable, counters);
+                            syncCloudEdit(note, book, "UPDATE", counters);
+                            counters.notesUpdated++;
+                        } else if (forceCloudReplay) {
+                            if (ksdkDualWriteAvailable) {
+                                syncKsdkEdit(readerSdk, note, book, "CREATE", counters);
+                            }
+                            syncCloudEdit(note, book, "CREATE", counters);
+                        }
+                    }
+                } else if (note != null && Boolean.TRUE.equals(previous.get(record.rangeKey()))) {
+                    if (!invokeBoolean(manager, "g", note, book)) {
+                        throw new IllegalStateException("native note delete rejected");
+                    }
+                    notifyNativeReader(readerSdk, note, book, "DELETE",
+                        ksdkDualWriteAvailable, counters);
+                    syncCloudEdit(note, book, "DELETE", counters);
+                    existing.remove(noteKey);
+                    counters.notesDeleted++;
+                }
+            }
+
+            for (Map.Entry<String, Boolean> oldEntry : previous.entrySet()) {
+                String oldRange = oldEntry.getKey();
+                if (desiredKeys.contains(oldRange)) {
+                    continue;
+                }
+                String[] positions = splitRangeKey(oldRange);
+                if (oldEntry.getValue().booleanValue()) {
+                    deleteExisting(existing, manager, readerSdk, book, 2, positions[0], positions[1],
+                        ksdkDualWriteAvailable, counters);
+                }
+                deleteExisting(existing, manager, readerSdk, book, 1, positions[0], positions[1],
+                    ksdkDualWriteAvailable, counters);
+            }
+
+            stage = "verify_native_annotations";
+            if (ownsBook) {
+                book.getClass().getMethod("close").invoke(book);
+                book = invokeCompatible(contentSdk, "dt", nativePath);
+                if (book == null) {
+                    throw new IllegalStateException("native book unavailable during verification");
+                }
+            }
+            Object verifiedListed = invokeCompatible(manager, "Q", book);
+            List<?> verifiedAnnotations = verifiedListed instanceof List
+                ? (List<?>) verifiedListed : Collections.emptyList();
+            Map<String, Object> verified = indexAnnotations(verifiedAnnotations);
+            verifyDesired(verified, desired);
+            verifyDeleted(verified, desiredKeys, previous);
+
+            stage = "sync_cloud_snapshot";
+            syncCloudSnapshot(book, verifiedAnnotations, counters);
+
+            out.println("local_verified=true");
+            out.println("native_notified=true");
+            out.println("ksdk_synced=" + (ksdkDualWriteAvailable ? "true" : "unavailable"));
+            out.println("cloud_synced=true");
+            out.println("cloud_snapshot_synced=true");
+            out.println("success=true");
+            counters.write(out);
+        } catch (Throwable error) {
+            Throwable cause = unwrap(error);
+            out.println("success=false");
+            out.println("failed_stage=" + stage);
+            out.println("error_class=" + cause.getClass().getName());
+            counters.write(out);
+        } finally {
+            if (book != null && ownsBook) {
+                try {
+                    book.getClass().getMethod("close").invoke(book);
+                } catch (Throwable ignored) {
+                    // Cleanup must not obscure a result already written.
+                }
+            }
+            out.close();
+        }
+    }
+
+    private static Properties loadPayload(String path) throws Exception {
+        if (path == null || !path.matches("^/tmp/goodreads-annotations-[0-9]+\\.properties$")) {
+            throw new IllegalArgumentException("invalid payload path");
+        }
+        File file = new File(path);
+        if (!file.isFile() || file.length() < 1 || file.length() > 512 * 1024) {
+            throw new IllegalArgumentException("invalid payload file");
+        }
+        Properties properties = new Properties();
+        FileInputStream input = new FileInputStream(file);
+        try {
+            properties.load(input);
+        } finally {
+            input.close();
+        }
+        // The attached JVM, rather than the launching shell, owns request
+        // deletion. Kindle's AttachLauncher may return before agentmain starts;
+        // deleting from the shell creates a race with this first file open.
+        if (!file.delete() && file.exists()) {
+            throw new IllegalStateException("cannot remove consumed payload");
+        }
+        if (!"1".equals(properties.getProperty("version"))) {
+            throw new IllegalArgumentException("unsupported payload version");
+        }
+        return properties;
+    }
+
+    private static String resultPath(String payloadPath) {
+        if (payloadPath == null || !payloadPath.matches("^/tmp/goodreads-annotations-[0-9]+\\.properties$")) {
+            throw new IllegalArgumentException("invalid payload path");
+        }
+        String requestId = payloadPath.substring(
+            "/tmp/goodreads-annotations-".length(),
+            payloadPath.length() - ".properties".length()
+        );
+        return "/tmp/goodreads-annotation-result-" + requestId + ".log";
+    }
+
+    private static List<Record> readRecords(Properties payload, String prefix) {
+        int count = parseCount(payload.getProperty(prefix + "_count"));
+        List<Record> records = new ArrayList<Record>();
+        Set<String> unique = new HashSet<String>();
+        for (int index = 0; index < count; index++) {
+            String base = prefix + "." + index + ".";
+            Record record = new Record(
+                requireLongPosition(payload.getProperty(base + "start")),
+                requireShortPosition(payload.getProperty(base + "start_short")),
+                requireLongPosition(payload.getProperty(base + "end")),
+                requireShortPosition(payload.getProperty(base + "end_short")),
+                decodeHex(payload.getProperty(base + "note_hex", ""))
+            );
+            if (!unique.add(record.rangeKey())) {
+                throw new IllegalArgumentException("duplicate annotation range");
+            }
+            records.add(record);
+        }
+        return records;
+    }
+
+    private static Map<String, Boolean> readPrevious(Properties payload, String prefix) {
+        int count = parseCount(payload.getProperty(prefix + "_count"));
+        Map<String, Boolean> keys = new HashMap<String, Boolean>();
+        for (int index = 0; index < count; index++) {
+            String value = payload.getProperty(prefix + "." + index);
+            int separator = value == null ? -1 : value.lastIndexOf(':');
+            if (separator < 1 || separator == value.length() - 1) {
+                throw new IllegalArgumentException("invalid previous annotation state");
+            }
+            String range = value.substring(0, separator);
+            String noteFlag = value.substring(separator + 1);
+            String[] positions = splitRangeKey(range);
+            if (!"0".equals(noteFlag) && !"1".equals(noteFlag)) {
+                throw new IllegalArgumentException("invalid previous note state");
+            }
+            keys.put(pairKey(positions[0], positions[1]), Boolean.valueOf("1".equals(noteFlag)));
+        }
+        return keys;
+    }
+
+    private static Map<String, Object> indexAnnotations(List<?> annotations) throws Exception {
+        Map<String, Object> indexed = new HashMap<String, Object>();
+        for (Object annotation : annotations) {
+            int type = ((Integer) annotation.getClass().getMethod("jm").invoke(annotation)).intValue();
+            if (type != 1 && type != 2) {
+                continue;
+            }
+            Object start = annotation.getClass().getMethod("jh").invoke(annotation);
+            Object end = annotation.getClass().getMethod("jd").invoke(annotation);
+            String startLong = String.valueOf(start.getClass().getMethod("nX").invoke(start));
+            String endLong = String.valueOf(end.getClass().getMethod("nX").invoke(end));
+            indexed.put(typedKey(type, startLong, endLong), annotation);
+        }
+        return indexed;
+    }
+
+    private static Object makePosition(
+        Object contentSdk,
+        Object book,
+        String encoded,
+        int shortPosition
+    ) throws Exception {
+        Object factory = invokeCompatible(contentSdk, "E", book);
+        Object position = invokeCompatible(factory, "a", encoded, book);
+        String roundTrip = String.valueOf(position.getClass().getMethod("nX").invoke(position));
+        if (!encoded.equals(roundTrip)) {
+            throw new IllegalStateException("native long position round-trip failed");
+        }
+        if (readShortPosition(position) == shortPosition) {
+            return position;
+        }
+        for (Constructor<?> constructor : position.getClass().getDeclaredConstructors()) {
+            Class<?>[] parameters = constructor.getParameterTypes();
+            if (parameters.length == 3
+                    && parameters[0].isAssignableFrom(book.getClass())
+                    && parameters[1] == String.class
+                    && parameters[2] == Integer.TYPE) {
+                constructor.setAccessible(true);
+                Object explicit = constructor.newInstance(book, encoded, Integer.valueOf(shortPosition));
+                if (readShortPosition(explicit) != shortPosition
+                        || !encoded.equals(String.valueOf(
+                            explicit.getClass().getMethod("nX").invoke(explicit)))) {
+                    throw new IllegalStateException("explicit native position verification failed");
+                }
+                return explicit;
+            }
+        }
+        throw new IllegalStateException("native position does not accept explicit short coordinate");
+    }
+
+    private static void deleteExisting(
+        Map<String, Object> existing,
+        Object manager,
+        Object readerSdk,
+        Object book,
+        int type,
+        String start,
+        String end,
+        boolean ksdkDualWriteAvailable,
+        Counters counters
+    ) throws Exception {
+        String key = typedKey(type, start, end);
+        Object annotation = existing.get(key);
+        if (annotation == null) {
+            return;
+        }
+        if (!invokeBoolean(manager, "g", annotation, book)) {
+            throw new IllegalStateException("native annotation delete rejected");
+        }
+        notifyNativeReader(readerSdk, annotation, book, "DELETE",
+            ksdkDualWriteAvailable, counters);
+        syncCloudEdit(annotation, book, "DELETE", counters);
+        existing.remove(key);
+        if (type == 1) {
+            counters.highlightsDeleted++;
+        } else {
+            counters.notesDeleted++;
+        }
+    }
+
+    private static void notifyNativeReader(
+        Object readerSdk,
+        Object annotation,
+        Object book,
+        String operationName,
+        boolean ksdkDualWriteAvailable,
+        Counters counters
+    ) throws Exception {
+        Object proxy = invokeCompatible(readerSdk, "xB");
+        if (proxy == null) {
+            throw new IllegalStateException("native annotation proxy unavailable");
+        }
+        Class<?> operationType = Class.forName(
+            "com.amazon.ebook.booklet.reader.impl.annotation.AnnotationWriteOperationType"
+        );
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        Object operation = Enum.valueOf((Class) operationType, operationName);
+        if (ksdkDualWriteAvailable) {
+            invokeKsdkProxy(proxy, annotation, book, operation);
+            counters.ksdkWrites++;
+        }
+        Class<?> bookDataType = Class.forName(
+            "com.amazon.ebook.booklet.reader.impl.annotation.proxy.BookData"
+        );
+        Object optionalBookData = invokeStaticCompatible(bookDataType, "ah", book);
+        boolean bookDataPresent = ((Boolean) optionalBookData.getClass()
+            .getMethod("isPresent").invoke(optionalBookData)).booleanValue();
+        if (!bookDataPresent) {
+            throw new IllegalStateException("native annotation book data unavailable");
+        }
+        Object bookData = optionalBookData.getClass().getMethod("get").invoke(optionalBookData);
+        Class<?> recordType = Class.forName(
+            "com.amazon.ebook.booklet.reader.impl.annotation.proxy.AnnotationRecord"
+        );
+        Object record = invokeStaticCompatible(recordType, "a", bookData, annotation);
+        invokeCompatible(proxy, "a", record, operation);
+        counters.nativeNotifications++;
+    }
+
+    private static void syncKsdkEdit(
+        Object readerSdk,
+        Object annotation,
+        Object book,
+        String operationName,
+        Counters counters
+    ) throws Exception {
+        Object proxy = invokeCompatible(readerSdk, "xB");
+        if (proxy == null) {
+            throw new IllegalStateException("native annotation proxy unavailable");
+        }
+        Class<?> operationType = Class.forName(
+            "com.amazon.ebook.booklet.reader.impl.annotation.AnnotationWriteOperationType"
+        );
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        Object operation = Enum.valueOf((Class) operationType, operationName);
+        invokeKsdkProxy(proxy, annotation, book, operation);
+        counters.ksdkWrites++;
+    }
+
+    private static void invokeKsdkProxy(
+        Object proxy,
+        Object annotation,
+        Object book,
+        Object operation
+    ) throws Exception {
+        try {
+            invokeCompatible(proxy, "a", annotation, book, operation);
+            return;
+        } catch (NoSuchMethodException missingFacadeMethod) {
+            for (Field field : proxy.getClass().getDeclaredFields()) {
+                field.setAccessible(true);
+                Object candidate = field.get(proxy);
+                if (candidate == null) {
+                    continue;
+                }
+                for (Method method : candidate.getClass().getMethods()) {
+                    if (method.getName().equals("a")
+                            && compatible(method.getParameterTypes(),
+                                new Object[] { annotation, book, operation })) {
+                        method.invoke(candidate, annotation, book, operation);
+                        return;
+                    }
+                }
+            }
+            throw missingFacadeMethod;
+        }
+    }
+
+    private static void syncCloudEdit(
+        Object annotation,
+        Object book,
+        String operationName,
+        Counters counters
+    ) throws Exception {
+        Class<?> bridge = Class.forName(
+            "com.amazon.ebook.booklet.reader.impl.whisperstore.WhisperStoreLipcBridge"
+        );
+        Object accepted;
+        if ("DELETE".equals(operationName)) {
+            accepted = invokeStaticCompatible(bridge, "d", annotation, book);
+        } else {
+            Object cloudAnnotation = cloudCompatibleAnnotation(annotation);
+            accepted = invokeStaticCompatible(
+                bridge,
+                "a",
+                cloudAnnotation,
+                book,
+                Boolean.valueOf("CREATE".equals(operationName))
+            );
+        }
+        if (!(accepted instanceof Boolean) || !((Boolean) accepted).booleanValue()) {
+            throw new IllegalStateException("native cloud annotation edit rejected");
+        }
+        counters.cloudEdits++;
+    }
+
+    /**
+     * Color-capable firmware returns a map from Highlight.Cf(), while this
+     * firmware's WhisperStore bridge casts Cf() directly to String. Present a
+     * delegating Annotation view with that unsupported optional field omitted;
+     * the persisted native annotation and its color remain untouched.
+     */
+    private static Object cloudCompatibleAnnotation(final Object annotation) throws Exception {
+        Object extra = annotation.getClass().getMethod("Cf").invoke(annotation);
+        if (extra == null || extra instanceof String) {
+            return annotation;
+        }
+        final Class<?> annotationType = Class.forName(
+            "com.amazon.ebook.booklet.reader.sdk.content.annotation.Annotation"
+        );
+        if (!annotationType.isInstance(annotation)) {
+            throw new IllegalStateException("native cloud annotation type mismatch");
+        }
+        return Proxy.newProxyInstance(
+            annotationType.getClassLoader(),
+            new Class<?>[] { annotationType },
+            new CloudAnnotationHandler(annotation)
+        );
+    }
+
+    private static void syncCloudSnapshot(
+        Object book,
+        List<?> annotations,
+        Counters counters
+    ) throws Exception {
+        Class<?> jsonObjectType = Class.forName("org.json.simple.JSONObject");
+        Class<?> jsonArrayType = Class.forName("org.json.simple.JSONArray");
+        @SuppressWarnings("unchecked")
+        List<Object> allAnnotations = (List<Object>) jsonArrayType.newInstance();
+        for (Object annotation : annotations) {
+            int type = ((Integer) annotation.getClass().getMethod("jm").invoke(annotation)).intValue();
+            if (type < 0 || type > 2) {
+                continue;
+            }
+            @SuppressWarnings("unchecked")
+            Map<Object, Object> item = (Map<Object, Object>) jsonObjectType.newInstance();
+            Object start = annotation.getClass().getMethod("jh").invoke(annotation);
+            Object end = annotation.getClass().getMethod("jd").invoke(annotation);
+            if (type == 0) {
+                item.put("type", "bookmark");
+                item.put("start_position", Integer.valueOf(readShortPosition(start)));
+            } else {
+                item.put("type", type == 1 ? "highlight" : "note");
+                item.put("start_position", Integer.valueOf(readShortPosition(start)));
+                item.put("end_position", Integer.valueOf(readShortPosition(end)));
+                if (type == 2) {
+                    item.put("customer_text", String.valueOf(
+                        annotation.getClass().getMethod("getText").invoke(annotation)));
+                }
+            }
+            @SuppressWarnings("unchecked")
+            Map<Object, Object> metadataJson = (Map<Object, Object>) jsonObjectType.newInstance();
+            Object created = annotation.getClass().getMethod("L").invoke(annotation);
+            Object modified = annotation.getClass().getMethod("Cd").invoke(annotation);
+            if (created != null) metadataJson.put("createdTime", created);
+            if (modified != null) metadataJson.put("lastModifiedTime", modified);
+            item.put("json_metadata", metadataJson.toString());
+            allAnnotations.add(item);
+        }
+
+        Object metadata = book.getClass().getMethod("jg").invoke(book);
+        String asin = String.valueOf(metadata.getClass().getMethod("getASIN").invoke(metadata));
+        String cdeType = String.valueOf(metadata.getClass().getMethod("getCdeType").invoke(metadata));
+        String guid = String.valueOf(metadata.getClass().getMethod("getGUID").invoke(metadata));
+        if (asin.length() == 0 || cdeType.length() == 0 || guid.length() == 0) {
+            throw new IllegalStateException("native annotation snapshot metadata unavailable");
+        }
+        Map<String, Object> payload = new HashMap<String, Object>();
+        payload.put("asin", asin);
+        payload.put("cde_type", cdeType);
+        payload.put("guid", guid);
+        payload.put("all_annotations", allAnnotations.toString());
+        Class<?> bridge = Class.forName(
+            "com.amazon.ebook.booklet.reader.impl.whisperstore.WhisperStoreLipcBridge"
+        );
+        Object accepted = invokeStaticCompatible(bridge, "b", payload, book);
+        if (!(accepted instanceof Boolean) || !((Boolean) accepted).booleanValue()) {
+            throw new IllegalStateException("native cloud annotation snapshot rejected");
+        }
+        counters.cloudSnapshots++;
+    }
+
+    private static final class CloudAnnotationHandler implements InvocationHandler {
+        private final Object annotation;
+
+        private CloudAnnotationHandler(Object annotation) {
+            this.annotation = annotation;
+        }
+
+        public Object invoke(Object proxy, Method method, Object[] arguments) throws Throwable {
+            if ("Cf".equals(method.getName()) && method.getParameterTypes().length == 0) {
+                return null;
+            }
+            try {
+                return method.invoke(annotation, arguments);
+            } catch (InvocationTargetException error) {
+                throw error.getCause();
+            }
+        }
+    }
+
+    private static Object invokeStaticCompatible(Class<?> type, String name, Object... arguments)
+            throws Exception {
+        for (Method method : type.getMethods()) {
+            if (method.getName().equals(name) && compatible(method.getParameterTypes(), arguments)) {
+                return method.invoke(null, arguments);
+            }
+        }
+        throw new NoSuchMethodException(type.getName() + "." + name);
+    }
+
+    private static Object invokeOptional(Object target, String name, Object... arguments) {
+        try {
+            return invokeCompatible(target, name, arguments);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static boolean bookMatchesAsin(Object book, String asin) {
+        if (book == null) {
+            return false;
+        }
+        try {
+            Object metadata = book.getClass().getMethod("jg").invoke(book);
+            if (metadata == null) {
+                return false;
+            }
+            Object cdeKey = metadata.getClass().getMethod("getCdeKey").invoke(metadata);
+            return asin.equals(String.valueOf(cdeKey));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static int readShortPosition(Object position) throws Exception {
+        return ((Integer) position.getClass().getMethod("UF").invoke(position)).intValue();
+    }
+
+    private static boolean positionMatches(Object annotation, Record record) throws Exception {
+        Object start = annotation.getClass().getMethod("jh").invoke(annotation);
+        Object end = annotation.getClass().getMethod("jd").invoke(annotation);
+        int startShort = readShortPosition(start);
+        int endShort = readShortPosition(end);
+        return (startShort == record.startShort && endShort == record.endShort)
+            || (startShort == record.endShort && endShort == record.startShort);
+    }
+
+    private static void repairGenerationSixAnnotations(
+        List<?> annotations,
+        Object manager,
+        Object readerSdk,
+        Object book,
+        List<Record> desired,
+        boolean ksdkDualWriteAvailable,
+        Counters counters
+    ) throws Exception {
+        for (Object annotation : new ArrayList<Object>(annotations)) {
+            int type = ((Integer) annotation.getClass().getMethod("jm").invoke(annotation)).intValue();
+            if (type != 1 && type != 2) {
+                continue;
+            }
+            Object start = annotation.getClass().getMethod("jh").invoke(annotation);
+            Object end = annotation.getClass().getMethod("jd").invoke(annotation);
+            int startShort = readShortPosition(start);
+            int endShort = readShortPosition(end);
+            String startLong = String.valueOf(start.getClass().getMethod("nX").invoke(start));
+            String endLong = String.valueOf(end.getClass().getMethod("nX").invoke(end));
+            boolean corrupt = false;
+            for (Record record : desired) {
+                boolean zeroAndStart = (startShort == 0 && endShort == record.startShort)
+                    || (endShort == 0 && startShort == record.startShort);
+                boolean carriesStartLong = record.startLong.equals(startLong)
+                    || record.startLong.equals(endLong);
+                if (zeroAndStart && carriesStartLong) {
+                    corrupt = true;
+                    break;
+                }
+            }
+            if (!corrupt) {
+                continue;
+            }
+            if (!invokeBoolean(manager, "g", annotation, book)) {
+                throw new IllegalStateException("generation 6 annotation cleanup rejected");
+            }
+            notifyNativeReader(readerSdk, annotation, book, "DELETE",
+                ksdkDualWriteAvailable, counters);
+            counters.zeroEndpointRepairs++;
+            if (type == 1) {
+                counters.highlightsDeleted++;
+            } else {
+                counters.notesDeleted++;
+            }
+        }
+    }
+
+    /**
+     * Generation 6 accidentally persisted the translated long endpoint with a
+     * short endpoint of zero. WhisperStore consequently rendered the range as
+     * starting at the beginning of the book. Those records may remain in the
+     * cloud after their local counterparts have been removed, so reconstruct
+     * their exact broken identity and explicitly journal a deletion.
+     */
+    private static void purgeGenerationSixCloudAnnotations(
+        Object contentSdk,
+        Object book,
+        List<Record> desired,
+        Map<String, Boolean> previous,
+        Counters counters
+    ) throws Exception {
+        for (Record record : desired) {
+            Object start = makePosition(contentSdk, book, record.startLong, record.startShort);
+            Object brokenEnd = makePosition(contentSdk, book, record.endLong, 0);
+            Object brokenHighlight = construct(
+                "com.amazon.ebook.booklet.reader.impl.annotation.personal.Highlight",
+                start,
+                brokenEnd
+            );
+            syncCloudEdit(brokenHighlight, book, "DELETE", counters);
+            counters.legacyCloudDeletes++;
+
+            boolean hadNote = record.note.length() > 0
+                || Boolean.TRUE.equals(previous.get(record.rangeKey()));
+            if (hadNote) {
+                Object brokenNote = construct(
+                    "com.amazon.ebook.booklet.reader.impl.annotation.personal.Note",
+                    record.note,
+                    start,
+                    brokenEnd
+                );
+                syncCloudEdit(brokenNote, book, "DELETE", counters);
+                counters.legacyCloudDeletes++;
+            }
+        }
+    }
+
+    private static void verifyDesired(Map<String, Object> existing, List<Record> desired)
+            throws Exception {
+        for (Record record : desired) {
+            Object highlight = existing.get(typedKey(1, record.startLong, record.endLong));
+            if (highlight == null || !positionMatches(highlight, record)) {
+                throw new IllegalStateException("native highlight durability check failed");
+            }
+            Object note = existing.get(typedKey(2, record.startLong, record.endLong));
+            if (record.note.length() == 0) {
+                if (note != null) {
+                    throw new IllegalStateException("native note removal durability check failed");
+                }
+            } else {
+                if (note == null || !positionMatches(note, record)) {
+                    throw new IllegalStateException("native note durability check failed");
+                }
+                String text = String.valueOf(note.getClass().getMethod("getText").invoke(note));
+                if (!record.note.equals(text)) {
+                    throw new IllegalStateException("native note text durability check failed");
+                }
+            }
+        }
+    }
+
+    private static void verifyDeleted(
+        Map<String, Object> existing,
+        Set<String> desiredKeys,
+        Map<String, Boolean> previous
+    ) {
+        for (String oldRange : previous.keySet()) {
+            if (desiredKeys.contains(oldRange)) {
+                continue;
+            }
+            String[] positions = splitRangeKey(oldRange);
+            if (existing.containsKey(typedKey(1, positions[0], positions[1]))
+                    || existing.containsKey(typedKey(2, positions[0], positions[1]))) {
+                throw new IllegalStateException("native annotation deletion durability check failed");
+            }
+        }
+    }
+
+    private static Object construct(String className, Object... arguments) throws Exception {
+        Class<?> type = Class.forName(className);
+        for (Constructor<?> constructor : type.getConstructors()) {
+            Class<?>[] parameters = constructor.getParameterTypes();
+            if (compatible(parameters, arguments)) {
+                return constructor.newInstance(arguments);
+            }
+        }
+        throw new NoSuchMethodException(className + " constructor");
+    }
+
+    private static Object invokeCompatible(Object target, String name, Object... arguments) throws Exception {
+        for (Method method : target.getClass().getMethods()) {
+            if (method.getName().equals(name) && compatible(method.getParameterTypes(), arguments)) {
+                return method.invoke(target, arguments);
+            }
+        }
+        throw new NoSuchMethodException(name);
+    }
+
+    private static boolean invokeBoolean(Object target, String name, Object... arguments) throws Exception {
+        Object value = invokeCompatible(target, name, arguments);
+        return value instanceof Boolean && ((Boolean) value).booleanValue();
+    }
+
+    private static boolean compatible(Class<?>[] parameters, Object[] arguments) {
+        if (parameters.length != arguments.length) {
+            return false;
+        }
+        for (int index = 0; index < parameters.length; index++) {
+            if (arguments[index] == null) {
+                return false;
+            }
+            Class<?> parameter = parameters[index];
+            Class<?> argument = arguments[index].getClass();
+            if (parameter.isPrimitive()) {
+                boolean boxed = (parameter == Boolean.TYPE && argument == Boolean.class)
+                    || (parameter == Integer.TYPE && argument == Integer.class)
+                    || (parameter == Long.TYPE && argument == Long.class)
+                    || (parameter == Double.TYPE && argument == Double.class)
+                    || (parameter == Float.TYPE && argument == Float.class)
+                    || (parameter == Short.TYPE && argument == Short.class)
+                    || (parameter == Byte.TYPE && argument == Byte.class)
+                    || (parameter == Character.TYPE && argument == Character.class);
+                if (!boxed) {
+                    return false;
+                }
+            } else if (!parameter.isAssignableFrom(argument)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static int parseCount(String value) {
+        int count = Integer.parseInt(value == null ? "0" : value);
+        if (count < 0 || count > 1000) {
+            throw new IllegalArgumentException("invalid annotation count");
+        }
+        return count;
+    }
+
+    private static String requireAsin(String value) {
+        if (value == null || !value.matches("^B[A-Z0-9]{9}$")) {
+            throw new IllegalArgumentException("invalid ASIN");
+        }
+        return value;
+    }
+
+    private static String requireRequestId(String value) {
+        if (value == null || !value.matches("^[0-9]{8,32}$")) {
+            throw new IllegalArgumentException("invalid request ID");
+        }
+        return value;
+    }
+
+    private static String requireNativePath(String value) throws Exception {
+        String lower = value == null ? "" : value.toLowerCase(java.util.Locale.ROOT);
+        boolean supported = lower.endsWith(".kfx") || lower.endsWith(".azw")
+            || lower.endsWith(".azw3") || lower.endsWith(".mobi") || lower.endsWith(".prc");
+        if (value == null || !value.startsWith("/mnt/us/documents/") || !supported
+                || value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0) {
+            throw new IllegalArgumentException("invalid native book path");
+        }
+        String canonical = new File(value).getCanonicalPath();
+        if (!canonical.startsWith("/mnt/us/documents/")) {
+            throw new IllegalArgumentException("native book path is outside documents");
+        }
+        return canonical;
+    }
+
+    private static String requireLongPosition(String value) {
+        if (value == null || !value.matches("^A[A-Za-z0-9+/]{11}$")) {
+            throw new IllegalArgumentException("invalid KFX long position");
+        }
+        return value;
+    }
+
+    private static int requireShortPosition(String value) {
+        if (value == null || !value.matches("^[0-9]{1,10}$")) {
+            throw new IllegalArgumentException("invalid KFX short position");
+        }
+        long parsed = Long.parseLong(value);
+        if (parsed > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("KFX short position out of range");
+        }
+        return (int) parsed;
+    }
+
+    private static String decodeHex(String value) {
+        if (value.length() > 131072 || (value.length() & 1) != 0 || !value.matches("^[0-9A-Fa-f]*$")) {
+            throw new IllegalArgumentException("invalid note encoding");
+        }
+        byte[] bytes = new byte[value.length() / 2];
+        for (int index = 0; index < bytes.length; index++) {
+            bytes[index] = (byte) Integer.parseInt(value.substring(index * 2, index * 2 + 2), 16);
+        }
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    private static String typedKey(int type, String start, String end) {
+        return type + ":" + pairKey(start, end);
+    }
+
+    private static String pairKey(String start, String end) {
+        return start.compareTo(end) <= 0 ? start + ":" + end : end + ":" + start;
+    }
+
+    private static String[] splitRangeKey(String value) {
+        if (value == null) {
+            throw new IllegalArgumentException("missing annotation key");
+        }
+        int separator = value.indexOf(':');
+        if (separator < 1 || separator != value.lastIndexOf(':')) {
+            throw new IllegalArgumentException("invalid annotation key");
+        }
+        String start = requireLongPosition(value.substring(0, separator));
+        String end = requireLongPosition(value.substring(separator + 1));
+        return new String[] { start, end };
+    }
+
+    private static Throwable unwrap(Throwable error) {
+        Throwable current = error;
+        while (current instanceof InvocationTargetException
+                && ((InvocationTargetException) current).getCause() != null) {
+            current = ((InvocationTargetException) current).getCause();
+        }
+        return current;
+    }
+
+    private static final class Record {
+        private final String startLong;
+        private final int startShort;
+        private final String endLong;
+        private final int endShort;
+        private final String note;
+
+        private Record(
+            String startLong,
+            int startShort,
+            String endLong,
+            int endShort,
+            String note
+        ) {
+            this.startLong = startLong;
+            this.startShort = startShort;
+            this.endLong = endLong;
+            this.endShort = endShort;
+            this.note = note;
+        }
+
+        private String rangeKey() {
+            return pairKey(startLong, endLong);
+        }
+    }
+
+    private static final class Counters {
+        private int highlightsCreated;
+        private int highlightsDeleted;
+        private int notesCreated;
+        private int notesUpdated;
+        private int notesDeleted;
+        private int nativeNotifications;
+        private int zeroEndpointRepairs;
+        private int cloudEdits;
+        private int legacyCloudDeletes;
+        private int cloudSnapshots;
+        private int ksdkWrites;
+
+        private void write(PrintWriter out) {
+            out.println("highlights_created=" + highlightsCreated);
+            out.println("highlights_deleted=" + highlightsDeleted);
+            out.println("notes_created=" + notesCreated);
+            out.println("notes_updated=" + notesUpdated);
+            out.println("notes_deleted=" + notesDeleted);
+            out.println("native_notifications=" + nativeNotifications);
+            out.println("zero_endpoint_repairs=" + zeroEndpointRepairs);
+            out.println("cloud_edits=" + cloudEdits);
+            out.println("legacy_cloud_deletes=" + legacyCloudDeletes);
+            out.println("cloud_snapshots=" + cloudSnapshots);
+            out.println("ksdk_writes=" + ksdkWrites);
+        }
+    }
+}

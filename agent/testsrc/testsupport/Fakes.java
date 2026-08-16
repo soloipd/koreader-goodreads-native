@@ -1,20 +1,37 @@
 package testsupport;
 
+import com.amazon.ebook.booklet.reader.impl.annotation.AnnotationWriteOperationType;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.HashMap;
+import java.util.Map;
 
 public final class Fakes {
     private Fakes() {}
 
     public static final class Position {
         private final String encoded;
+        private final int shortPosition;
 
         public Position(String encoded) {
+            this(encoded, 0);
+        }
+
+        public Position(String encoded, int shortPosition) {
             this.encoded = encoded;
+            this.shortPosition = shortPosition;
+        }
+
+        public Position(Book ignored, String encoded, int shortPosition) {
+            this(encoded, shortPosition);
         }
 
         public String nX() {
             return encoded;
+        }
+
+        public Integer UF() {
+            return Integer.valueOf(shortPosition);
         }
     }
 
@@ -23,6 +40,28 @@ public final class Fakes {
 
         public void close() {
             closed = true;
+        }
+
+        public AnnotationProvider Uc() {
+            return new AnnotationProvider();
+        }
+
+        public Metadata jg() {
+            return new Metadata();
+        }
+    }
+
+    public static final class Metadata {
+        public String getASIN() { return "B0FLB24198"; }
+        public String getCdeType() { return "EBOK"; }
+        public String getGUID() { return "test-guid"; }
+    }
+
+    public static final class AnnotationProvider {
+        public Map<String, Object> j(Book ignored) {
+            Map<String, Object> payload = new HashMap<String, Object>();
+            payload.put("all_annotations", "[]");
+            return payload;
         }
     }
 
@@ -40,28 +79,28 @@ public final class Fakes {
         }
 
         public boolean c(Object annotation, Book ignored) {
+            throw new AssertionError("high-level create must not be used");
+        }
+
+        public boolean e(Object annotation, Book ignored) {
+            throw new AssertionError("high-level update must not be used");
+        }
+
+        public boolean d(Object annotation, Book ignored) {
+            throw new AssertionError("high-level delete must not be used");
+        }
+
+        public boolean f(Object annotation, Book ignored) {
             annotations.add(annotation);
             return true;
         }
 
-        public boolean e(Object annotation, Book ignored) {
+        public boolean h(Object annotation, Book ignored) {
             return annotations.contains(annotation);
         }
 
-        public boolean d(Object annotation, Book ignored) {
-            return annotations.remove(annotation);
-        }
-
-        public boolean f(Object annotation, Book ignored) {
-            throw new AssertionError("low-level create must not be used");
-        }
-
-        public boolean h(Object annotation, Book ignored) {
-            throw new AssertionError("low-level update must not be used");
-        }
-
         public boolean g(Object annotation, Book ignored) {
-            throw new AssertionError("low-level delete must not be used");
+            return annotations.remove(annotation);
         }
     }
 
@@ -85,9 +124,39 @@ public final class Fakes {
 
     public static final class SDK {
         public final ContentSDK content = new ContentSDK();
+        public final AnnotationProxy proxy = new AnnotationProxy();
 
         public ContentSDK jE() {
             return content;
+        }
+
+        public AnnotationProxy xB() {
+            return proxy;
+        }
+    }
+
+    public static final class AnnotationProxy {
+        public final List<AnnotationWriteOperationType> operations =
+            new ArrayList<AnnotationWriteOperationType>();
+        public final List<AnnotationWriteOperationType> ksdkOperations =
+            new ArrayList<AnnotationWriteOperationType>();
+
+        public void a(Object record, AnnotationWriteOperationType operation) {
+            if (record == null) {
+                throw new AssertionError("native notification requires an annotation record");
+            }
+            operations.add(operation);
+        }
+
+        public void a(
+            com.amazon.ebook.booklet.reader.sdk.content.annotation.Annotation annotation,
+            Book book,
+            AnnotationWriteOperationType operation
+        ) {
+            if (annotation == null || book == null) {
+                throw new AssertionError("KSDK write requires annotation and book");
+            }
+            ksdkOperations.add(operation);
         }
     }
 }

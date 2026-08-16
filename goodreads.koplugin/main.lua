@@ -53,6 +53,10 @@ local ANNOTATION_RESULT_KEYS = {
     requested = true,
     local_success = true,
     local_verified = true,
+    native_notified = true,
+    ksdk_synced = true,
+    cloud_synced = true,
+    cloud_snapshot_synced = true,
     success = true,
     failed_stage = true,
     error_class = true,
@@ -61,6 +65,13 @@ local ANNOTATION_RESULT_KEYS = {
     notes_created = true,
     notes_updated = true,
     notes_deleted = true,
+    native_notifications = true,
+    zero_endpoint_repairs = true,
+    cloud_edits = true,
+    cloud_snapshots = true,
+    ksdk_writes = true,
+    legacy_cloud_deletes = true,
+    book_source = true,
     sync_enqueued = true,
 }
 local DEBUG_FIELD_ORDER = {
@@ -77,6 +88,10 @@ local DEBUG_FIELD_ORDER = {
     "success",
     "local_success",
     "local_verified",
+    "native_notified",
+    "ksdk_synced",
+    "cloud_synced",
+    "cloud_snapshot_synced",
     "failed_stage",
     "error_class",
     "changed",
@@ -89,6 +104,13 @@ local DEBUG_FIELD_ORDER = {
     "notes_created",
     "notes_updated",
     "notes_deleted",
+    "native_notifications",
+    "zero_endpoint_repairs",
+    "cloud_edits",
+    "cloud_snapshots",
+    "ksdk_writes",
+    "legacy_cloud_deletes",
+    "book_source",
     "sync_enqueued",
     "interval_seconds",
     "attempt",
@@ -643,11 +665,17 @@ function Goodreads:startAnnotationReconcile(snapshot)
         end
         for _, position in ipairs(result.positions) do
             local start_long = position and position.start and position.start.long
+            local start_short = position and position.start and position.start.pid
             local end_long = position and position["end"] and position["end"].long
+            local end_short = position and position["end"] and position["end"].pid
             if type(start_long) ~= "string" or #start_long ~= 12
                 or not start_long:match("^A[%w%+/]+$")
+                or type(start_short) ~= "number" or start_short < 0
+                or start_short > 2147483647 or start_short ~= math.floor(start_short)
                 or type(end_long) ~= "string" or #end_long ~= 12
                 or not end_long:match("^A[%w%+/]+$")
+                or type(end_short) ~= "number" or end_short < 0
+                or end_short > 2147483647 or end_short ~= math.floor(end_short)
             then
                 self:debugLog("annotations_sync_skipped", {
                     trigger = trigger,
@@ -676,7 +704,9 @@ function Goodreads:startAnnotationReconcile(snapshot)
         local position = translated[index]
         local base = "desired." .. tostring(index - 1) .. "."
         payload:write(base, "start=", position.start.long, "\n")
+        payload:write(base, "start_short=", tostring(position.start.pid), "\n")
         payload:write(base, "end=", position["end"].long, "\n")
+        payload:write(base, "end_short=", tostring(position["end"].pid), "\n")
         payload:write(base, "note_hex=", hexEncode(item.note), "\n")
     end
     local previous = readAnnotationState(asin)
@@ -775,6 +805,10 @@ function Goodreads:pollAnnotationResult(snapshot)
         if result and result.asin == asin and result.request_id == request_id then
             local success = result.success == "true"
                 and result.local_verified == "true"
+                and result.native_notified == "true"
+                and (result.ksdk_synced == "true" or result.ksdk_synced == "unavailable")
+                and result.cloud_synced == "true"
+                and result.cloud_snapshot_synced == "true"
                 and result.sync_enqueued == "true"
             self:debugLog("annotations_sync_result", {
                 trigger = trigger,
@@ -784,6 +818,10 @@ function Goodreads:pollAnnotationResult(snapshot)
                 success = success,
                 local_success = result.local_success,
                 local_verified = result.local_verified,
+                native_notified = result.native_notified,
+                ksdk_synced = result.ksdk_synced,
+                cloud_synced = result.cloud_synced,
+                cloud_snapshot_synced = result.cloud_snapshot_synced,
                 failed_stage = result.failed_stage,
                 error_class = result.error_class,
                 highlights_created = result.highlights_created,
@@ -791,6 +829,13 @@ function Goodreads:pollAnnotationResult(snapshot)
                 notes_created = result.notes_created,
                 notes_updated = result.notes_updated,
                 notes_deleted = result.notes_deleted,
+                native_notifications = result.native_notifications,
+                zero_endpoint_repairs = result.zero_endpoint_repairs,
+                cloud_edits = result.cloud_edits,
+                cloud_snapshots = result.cloud_snapshots,
+                ksdk_writes = result.ksdk_writes,
+                legacy_cloud_deletes = result.legacy_cloud_deletes,
+                book_source = result.book_source,
                 sync_enqueued = result.sync_enqueued,
             })
             self.last_annotation_sync_result = result
@@ -1774,11 +1819,17 @@ function Goodreads:showDiagnostics()
     if self.last_annotation_sync_result then
         local result = self.last_annotation_sync_result
         table.insert(lines, string.format(
-            _("Latest annotation sync: %s; durable native write %s; native queue %s; %s highlight(s) created, %s note(s) created, %s note(s) updated"),
+            _("Latest annotation sync: %s; local readback %s; KPP/KSDK bridge %s; WhisperStore %s; native queue %s; %s highlight(s) created, %s note(s) created, %s note(s) updated"),
             result.success == "true" and result.local_verified == "true"
+                and result.native_notified == "true"
+                and (result.ksdk_synced == "true" or result.ksdk_synced == "unavailable")
+                and result.cloud_synced == "true"
+                and result.cloud_snapshot_synced == "true"
                 and result.sync_enqueued == "true"
                 and _("accepted") or _("failed"),
             result.local_verified == "true" and _("verified") or _("not verified"),
+            result.native_notified == "true" and _("notified") or _("not notified"),
+            result.cloud_synced == "true" and _("accepted") or _("rejected"),
             result.sync_enqueued == "true" and _("accepted") or _("not queued"),
             result.highlights_created or "0",
             result.notes_created or "0",

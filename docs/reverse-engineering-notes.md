@@ -96,5 +96,21 @@ Persisted annotations may report their start and end positions in the opposite
 order from the translated KOReader range. Reconciliation therefore identifies
 ranges without direction and attaches notes using the persisted highlight's
 native endpoint order.
+The manager's low-level durable methods do not call WhisperStore on this
+firmware because `WhisperStoreKwisUtils.Ls()` is false. The agent therefore
+invokes `WhisperStoreLipcBridge.a(...)` and `.d(...)` explicitly, enables the
+native shadow-mode sync lanes before writing, then asks the annotation
+controller to enqueue synchronization. The outgoing Java bridge also contains
+an `annotationsDualWriteToKSDK` route, but this firmware does not export that
+LIPC property—even while a native book is open—so the agent treats direct KSDK
+writing as unavailable instead of reporting a false success. Color highlights need
+a cloud-only proxy whose `Cf()` is null because this firmware returns a color
+map from `Highlight.Cf()` but WhisperStore casts that value to `String`.
+
+Older agents also discarded the converter's short PID. A long-position
+round-trip could still succeed while the reconstructed end PID was zero. The
+upgrade migration reconstructs those exact malformed cloud identities, sends
+deletions, and replays the desired ranges with explicit short and long
+coordinates.
 Visibility remains governed by the Kindle/Amazon annotation pipeline; the
 plugin does not invent or override a public-sharing flag.
