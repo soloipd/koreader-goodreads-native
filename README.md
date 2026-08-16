@@ -153,30 +153,39 @@ suspend, close, and the manual sync action. The coordinate map contains no book
 or annotation text. Rapid changes are serialized: the latest snapshot for each
 book replaces stale queued work, transient failures retry up to three times,
 and close-time snapshots can retry after the reader UI has unloaded the book.
-Each reconciliation updates ReaderSDK's local store, explicitly sends Kindle's
-KPP annotation-change notification, and journals the same edit through
-WhisperStore. If the firmware exports the separate KSDK dual-write operation,
-the agent uses that too; this operation is absent on some Kindle releases and
-is then reported as unavailable rather than successful. These explicit steps
-are required because books
-opened by file path are not marked as native KPPReader books, so ReaderSDK
-otherwise suppresses parts of the native pipeline. The agent then closes and
-reopens the book for a local readback. Only after local verification, native
-notification, and WhisperStore acceptance does the helper enqueue native
-annotation synchronization and start WhisperSync. The helper enables the
-legacy journal and KSDK sync lanes before the write. Diagnostics report each
-stage separately.
+If ReaderSDK has released the exact local KFX handle, the newest snapshot is
+coalesced into a root-only pending file. A single low-power LIPC watcher waits
+for Kindle's native-reader start event and replays that snapshot automatically
+when the matching local book is opened; cloud placeholders with the same ASIN
+are never selected.
+Each reconciliation updates ReaderSDK's local store and explicitly sends
+Kindle's KPP annotation-change notification. It then detects the annotation
+pipeline enabled by the running firmware. Legacy-journal firmware receives
+native `JournalingService` entries followed by a `WhisperSyncV1` upload
+request; KSDK-enabled firmware receives the corresponding KSDK proxy write.
+The optional direct WhisperStore snapshot path is used only when that firmware
+feature is enabled. These explicit steps are required because detached books
+are not marked as live KPPReader books, so ReaderSDK suppresses parts of the
+native pipeline. The agent therefore reconciles only against an exact active
+path and leaves inactive work pending for the native-open watcher. Only after local verification, native
+notification, a supported native journal write, and an upload request does the
+helper wake the system annotation and WhisperSync queues. The helper enables
+the legacy journal and KSDK sync lanes before the write. Diagnostics report
+each stage separately and never equate a disabled bridge with cloud delivery.
 
-The upgrade migration removes annotations produced by the older zero-endpoint
-bug from both the local store and WhisperStore before replaying corrected
-ranges. On color-capable firmware, cloud serialization omits only the optional
-color metadata that Amazon's bridge incorrectly casts to text; native color is
-not changed.
+The upgrade migration removes annotations produced by older zero-endpoint
+ranges from the native store and active cloud journal before replaying
+corrected ranges. Terminal KFX endpoints are reconstructed through Kindle's
+native position factory, preventing a short selection from expanding back to
+location 1. On firmware with the optional WhisperStore path, cloud
+serialization omits only color metadata that its bridge cannot serialize;
+native color is not changed.
 
-Annotation text exists only in KOReader's own metadata, a mode-0600 transient
-request under `/tmp`, and the native Kindle annotation store. Transient
-requests are removed after each attempt. Logs and plugin dedupe state contain
-counts and coordinates only.
+Annotation text exists only in KOReader's own metadata, a mode-0600 request,
+the coalesced pending snapshot when native KPP is inactive, and the native
+Kindle annotation store. Transient requests and successful pending snapshots
+are removed after use. Logs and plugin dedupe state contain counts and
+coordinates only.
 
 Goodreads-linked Kindle notes and highlights remain private by default when
 they travel through Amazon's native pipeline; sharing visibility should remain

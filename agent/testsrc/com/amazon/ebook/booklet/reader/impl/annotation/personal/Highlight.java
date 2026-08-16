@@ -2,6 +2,8 @@ package com.amazon.ebook.booklet.reader.impl.annotation.personal;
 
 import testsupport.Fakes;
 import com.amazon.ebook.booklet.reader.sdk.content.annotation.Annotation;
+import com.amazon.ebook.booklet.reader.sdk.content.annotation.AnnotationExport;
+import com.amazon.ebook.booklet.reader.sdk.content.annotation.JournalType;
 import java.util.HashMap;
 
 public class Highlight implements Annotation {
@@ -32,4 +34,13 @@ public class Highlight implements Annotation {
     public Object L() { return null; }
 
     public Object Cd() { return null; }
+
+    public AnnotationExport Ci() {
+        AnnotationExport value = new AnnotationExport();
+        value.czc = start.UF().intValue();
+        value.czd = end.UF().intValue();
+        return value;
+    }
+
+    public JournalType CS() { return JournalType.HIGHLIGHT; }
 }

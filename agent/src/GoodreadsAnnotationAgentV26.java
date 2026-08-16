@@ -20,8 +20,8 @@ import java.util.Properties;
 import java.util.Set;
 
 /** Reconciles KOReader highlights with the native Kindle annotation store. */
-public final class GoodreadsAnnotationAgentV15 {
-    private GoodreadsAnnotationAgentV15() {}
+public final class GoodreadsAnnotationAgentV26 {
+    private GoodreadsAnnotationAgentV26() {}
 
     public static void agentmain(String payloadPath, Instrumentation instrumentation) {
         PrintWriter out;
@@ -32,7 +32,8 @@ public final class GoodreadsAnnotationAgentV15 {
         }
 
         Object book = null;
-        boolean ownsBook = false;
+        Object kppBook = null;
+        boolean notifyKpp = false;
         String stage = "validate_payload";
         Counters counters = new Counters();
         try {
@@ -49,8 +50,6 @@ public final class GoodreadsAnnotationAgentV15 {
                 payload.getProperty("force_cloud_replay"));
             boolean purgeLegacyCloud = "true".equals(
                 payload.getProperty("purge_legacy_cloud"));
-            boolean ksdkDualWriteAvailable = "true".equals(
-                payload.getProperty("ksdk_dualwrite_available"));
             List<Record> desired = readRecords(payload, "desired");
             Map<String, Boolean> previous = readPrevious(payload, "previous");
             out.println("asin=" + asin);
@@ -65,16 +64,30 @@ public final class GoodreadsAnnotationAgentV15 {
                 throw new IllegalStateException("ReaderSDK unavailable");
             }
             Object contentSdk = readerSdk.getClass().getMethod("jE").invoke(readerSdk);
+            boolean ksdkEnabled = invokeStaticBoolean(
+                "com.amazon.ebook.booklet.reader.impl.annotation.proxy.ksdkannotations.KSDKAnnotationsConfig",
+                "Em"
+            );
+            boolean whisperStoreEnabled = invokeStaticBoolean(
+                "com.amazon.ebook.booklet.reader.impl.whisperstore.WhisperStoreKwisUtils",
+                "Ls"
+            );
+            out.println("ksdk_enabled=" + ksdkEnabled);
+            out.println("whisperstore_enabled=" + whisperStoreEnabled);
 
             stage = "open_book";
             Object activeBook = invokeOptional(readerSdk, "jy");
-            if (bookMatchesAsin(activeBook, asin)) {
+            if (bookMatchesAsin(activeBook, asin)
+                    && bookMatchesPath(activeBook, nativePath)) {
                 book = activeBook;
+                kppBook = activeBook;
+                notifyKpp = true;
                 out.println("book_source=active");
             } else {
-                book = invokeCompatible(contentSdk, "dt", nativePath);
-                ownsBook = true;
-                out.println("book_source=detached");
+                out.println("book_source=" + (bookMatchesAsin(activeBook, asin)
+                    ? "inactive_identity_mismatch" : "inactive"));
+                stage = "wait_for_active_book";
+                throw new IllegalStateException("requested native book is not active");
             }
             if (book == null) {
                 throw new IllegalStateException("native book unavailable");
@@ -89,8 +102,8 @@ public final class GoodreadsAnnotationAgentV15 {
             if (repairZeroEndpoint) {
                 stage = "repair_generation_6_annotations";
                 repairGenerationSixAnnotations(
-                    annotations, manager, readerSdk, book, desired,
-                    ksdkDualWriteAvailable, counters);
+                    annotations, manager, readerSdk, book, kppBook, nativePath, desired,
+                    notifyKpp, ksdkEnabled, whisperStoreEnabled, counters);
                 listed = invokeCompatible(manager, "Q", book);
                 annotations = listed instanceof List ? (List<?>) listed : Collections.emptyList();
                 existing = indexAnnotations(annotations);
@@ -99,8 +112,13 @@ public final class GoodreadsAnnotationAgentV15 {
             if (purgeLegacyCloud) {
                 stage = "purge_generation_6_cloud_annotations";
                 purgeGenerationSixCloudAnnotations(
-                    contentSdk, book, desired, previous, counters);
+                    contentSdk, readerSdk, book, nativePath, desired, previous,
+                    notifyKpp, ksdkEnabled, whisperStoreEnabled, counters);
             }
+
+            stage = "normalize_terminal_endpoints";
+            desired = normalizeDesiredRecords(contentSdk, book, desired, counters);
+            previous = normalizePreviousRanges(contentSdk, book, previous);
 
             stage = "reconcile_annotations";
             Set<String> desiredKeys = new HashSet<String>();
@@ -116,8 +134,12 @@ public final class GoodreadsAnnotationAgentV15 {
                     if (!invokeBoolean(manager, "g", highlight, book)) {
                         throw new IllegalStateException("invalid native highlight repair rejected");
                     }
-                    notifyNativeReader(readerSdk, highlight, book, "DELETE",
-                        ksdkDualWriteAvailable, counters);
+                    if (notifyKpp) {
+                        notifyNativeReader(readerSdk, highlight, kppBook, "DELETE",
+                            false, counters);
+                    }
+                    syncNativeCloudEdit(readerSdk, highlight, book, nativePath, "DELETE",
+                        ksdkEnabled, whisperStoreEnabled, counters);
                     counters.highlightsDeleted++;
                     counters.zeroEndpointRepairs++;
                     existing.remove(highlightKey);
@@ -132,9 +154,12 @@ public final class GoodreadsAnnotationAgentV15 {
                     if (!invokeBoolean(manager, "f", highlight, book)) {
                         throw new IllegalStateException("native highlight create rejected");
                     }
-                    notifyNativeReader(readerSdk, highlight, book, "CREATE",
-                        ksdkDualWriteAvailable, counters);
-                    syncCloudEdit(highlight, book, "CREATE", counters);
+                    if (notifyKpp) {
+                        notifyNativeReader(readerSdk, highlight, kppBook, "CREATE",
+                            false, counters);
+                    }
+                    syncNativeCloudEdit(readerSdk, highlight, book, nativePath, "CREATE",
+                        ksdkEnabled, whisperStoreEnabled, counters);
                     existing.put(highlightKey, highlight);
                     counters.highlightsCreated++;
                 } else {
@@ -144,11 +169,16 @@ public final class GoodreadsAnnotationAgentV15 {
                     // attaching a note so the manager accepts it.
                     start = highlight.getClass().getMethod("jh").invoke(highlight);
                     end = highlight.getClass().getMethod("jd").invoke(highlight);
+                    // A detached reconciliation can leave KPP's live annotation
+                    // index stale even though ReaderSDK can read the durable
+                    // record back. Re-announce the persisted object as an update
+                    // so the native reader refreshes/upserts it by annotation ID.
+                    if (notifyKpp) {
+                        notifyKppReader(readerSdk, highlight, kppBook, "UPDATE", counters);
+                    }
                     if (forceCloudReplay) {
-                        if (ksdkDualWriteAvailable) {
-                            syncKsdkEdit(readerSdk, highlight, book, "CREATE", counters);
-                        }
-                        syncCloudEdit(highlight, book, "CREATE", counters);
+                        syncNativeCloudEdit(readerSdk, highlight, book, nativePath, "UPDATE",
+                            ksdkEnabled, whisperStoreEnabled, counters);
                     }
                 }
 
@@ -165,9 +195,12 @@ public final class GoodreadsAnnotationAgentV15 {
                         if (!invokeBoolean(manager, "f", note, book)) {
                             throw new IllegalStateException("native note create rejected");
                         }
-                        notifyNativeReader(readerSdk, note, book, "CREATE",
-                            ksdkDualWriteAvailable, counters);
-                        syncCloudEdit(note, book, "CREATE", counters);
+                        if (notifyKpp) {
+                            notifyNativeReader(readerSdk, note, kppBook, "CREATE",
+                                false, counters);
+                        }
+                        syncNativeCloudEdit(readerSdk, note, book, nativePath, "CREATE",
+                            ksdkEnabled, whisperStoreEnabled, counters);
                         existing.put(noteKey, note);
                         counters.notesCreated++;
                     } else {
@@ -177,24 +210,33 @@ public final class GoodreadsAnnotationAgentV15 {
                             if (!invokeBoolean(manager, "h", note, book)) {
                                 throw new IllegalStateException("native note update rejected");
                             }
-                            notifyNativeReader(readerSdk, note, book, "UPDATE",
-                                ksdkDualWriteAvailable, counters);
-                            syncCloudEdit(note, book, "UPDATE", counters);
-                            counters.notesUpdated++;
-                        } else if (forceCloudReplay) {
-                            if (ksdkDualWriteAvailable) {
-                                syncKsdkEdit(readerSdk, note, book, "CREATE", counters);
+                            if (notifyKpp) {
+                                notifyNativeReader(readerSdk, note, kppBook, "UPDATE",
+                                    false, counters);
                             }
-                            syncCloudEdit(note, book, "CREATE", counters);
+                            syncNativeCloudEdit(readerSdk, note, book, nativePath, "UPDATE",
+                                ksdkEnabled, whisperStoreEnabled, counters);
+                            counters.notesUpdated++;
+                        } else {
+                            if (notifyKpp) {
+                                notifyKppReader(readerSdk, note, kppBook, "UPDATE", counters);
+                            }
+                            if (forceCloudReplay) {
+                                syncNativeCloudEdit(readerSdk, note, book, nativePath, "UPDATE",
+                                    ksdkEnabled, whisperStoreEnabled, counters);
+                            }
                         }
                     }
                 } else if (note != null && Boolean.TRUE.equals(previous.get(record.rangeKey()))) {
                     if (!invokeBoolean(manager, "g", note, book)) {
                         throw new IllegalStateException("native note delete rejected");
                     }
-                    notifyNativeReader(readerSdk, note, book, "DELETE",
-                        ksdkDualWriteAvailable, counters);
-                    syncCloudEdit(note, book, "DELETE", counters);
+                    if (notifyKpp) {
+                        notifyNativeReader(readerSdk, note, kppBook, "DELETE",
+                            false, counters);
+                    }
+                    syncNativeCloudEdit(readerSdk, note, book, nativePath, "DELETE",
+                        ksdkEnabled, whisperStoreEnabled, counters);
                     existing.remove(noteKey);
                     counters.notesDeleted++;
                 }
@@ -208,20 +250,15 @@ public final class GoodreadsAnnotationAgentV15 {
                 String[] positions = splitRangeKey(oldRange);
                 if (oldEntry.getValue().booleanValue()) {
                     deleteExisting(existing, manager, readerSdk, book, 2, positions[0], positions[1],
-                        ksdkDualWriteAvailable, counters);
+                        kppBook, nativePath, notifyKpp,
+                        ksdkEnabled, whisperStoreEnabled, counters);
                 }
                 deleteExisting(existing, manager, readerSdk, book, 1, positions[0], positions[1],
-                    ksdkDualWriteAvailable, counters);
+                    kppBook, nativePath, notifyKpp,
+                    ksdkEnabled, whisperStoreEnabled, counters);
             }
 
             stage = "verify_native_annotations";
-            if (ownsBook) {
-                book.getClass().getMethod("close").invoke(book);
-                book = invokeCompatible(contentSdk, "dt", nativePath);
-                if (book == null) {
-                    throw new IllegalStateException("native book unavailable during verification");
-                }
-            }
             Object verifiedListed = invokeCompatible(manager, "Q", book);
             List<?> verifiedAnnotations = verifiedListed instanceof List
                 ? (List<?>) verifiedListed : Collections.emptyList();
@@ -229,14 +266,23 @@ public final class GoodreadsAnnotationAgentV15 {
             verifyDesired(verified, desired);
             verifyDeleted(verified, desiredKeys, previous);
 
-            stage = "sync_cloud_snapshot";
-            syncCloudSnapshot(book, verifiedAnnotations, counters);
+            if (whisperStoreEnabled) {
+                stage = "sync_cloud_snapshot";
+                syncCloudSnapshot(book, verifiedAnnotations, counters);
+            }
+
+            if (!ksdkEnabled && counters.nativeJournalEdits > 0) {
+                stage = "request_native_cloud_upload";
+                requestNativeCloudUpload(readerSdk, counters);
+            }
 
             out.println("local_verified=true");
-            out.println("native_notified=true");
-            out.println("ksdk_synced=" + (ksdkDualWriteAvailable ? "true" : "unavailable"));
-            out.println("cloud_synced=true");
-            out.println("cloud_snapshot_synced=true");
+            out.println("native_notified=" + (notifyKpp ? "true" : "unavailable"));
+            out.println("ksdk_synced=" + (ksdkEnabled ? "true" : "unavailable"));
+            out.println("legacy_journaled=" + (!ksdkEnabled ? "true" : "unavailable"));
+            out.println("native_cloud_queued=true");
+            out.println("cloud_synced=queued");
+            out.println("cloud_snapshot_synced=" + (whisperStoreEnabled ? "true" : "unavailable"));
             out.println("success=true");
             counters.write(out);
         } catch (Throwable error) {
@@ -244,15 +290,15 @@ public final class GoodreadsAnnotationAgentV15 {
             out.println("success=false");
             out.println("failed_stage=" + stage);
             out.println("error_class=" + cause.getClass().getName());
+            StackTraceElement[] trace = cause.getStackTrace();
+            for (int index = 0; index < trace.length && index < 8; index++) {
+                StackTraceElement frame = trace[index];
+                out.println("error_trace_" + index + "="
+                    + frame.getClassName() + "." + frame.getMethodName()
+                    + ":" + frame.getLineNumber());
+            }
             counters.write(out);
         } finally {
-            if (book != null && ownsBook) {
-                try {
-                    book.getClass().getMethod("close").invoke(book);
-                } catch (Throwable ignored) {
-                    // Cleanup must not obscure a result already written.
-                }
-            }
             out.close();
         }
     }
@@ -364,26 +410,150 @@ public final class GoodreadsAnnotationAgentV15 {
         if (!encoded.equals(roundTrip)) {
             throw new IllegalStateException("native long position round-trip failed");
         }
-        if (readShortPosition(position) == shortPosition) {
-            return position;
+        if (readShortPosition(position) != shortPosition) {
+            throw new IllegalStateException("native short position mismatch");
         }
-        for (Constructor<?> constructor : position.getClass().getDeclaredConstructors()) {
+        return position;
+    }
+
+    /**
+     * Reconstruct only the malformed generation-6 cloud identity so it can be
+     * deleted. This synthetic zero-short position is never persisted locally.
+     */
+    private static Object makeLegacyBrokenPosition(
+        Object contentSdk,
+        Object book,
+        String encoded
+    ) throws Exception {
+        Object factory = invokeCompatible(contentSdk, "E", book);
+        Object resolved = invokeCompatible(factory, "a", encoded, book);
+        for (Constructor<?> constructor : resolved.getClass().getDeclaredConstructors()) {
             Class<?>[] parameters = constructor.getParameterTypes();
             if (parameters.length == 3
                     && parameters[0].isAssignableFrom(book.getClass())
                     && parameters[1] == String.class
                     && parameters[2] == Integer.TYPE) {
                 constructor.setAccessible(true);
-                Object explicit = constructor.newInstance(book, encoded, Integer.valueOf(shortPosition));
-                if (readShortPosition(explicit) != shortPosition
-                        || !encoded.equals(String.valueOf(
-                            explicit.getClass().getMethod("nX").invoke(explicit)))) {
-                    throw new IllegalStateException("explicit native position verification failed");
+                Object broken = constructor.newInstance(book, encoded, Integer.valueOf(0));
+                if (readShortPosition(broken) == 0
+                        && encoded.equals(String.valueOf(
+                            broken.getClass().getMethod("nX").invoke(broken)))) {
+                    return broken;
                 }
-                return explicit;
             }
         }
-        throw new IllegalStateException("native position does not accept explicit short coordinate");
+        throw new IllegalStateException("legacy broken cloud position unavailable");
+    }
+
+    private static List<Record> normalizeDesiredRecords(
+        Object contentSdk,
+        Object book,
+        List<Record> records,
+        Counters counters
+    ) throws Exception {
+        List<Record> normalized = new ArrayList<Record>(records.size());
+        Object factory = invokeCompatible(contentSdk, "E", book);
+        for (Record record : records) {
+            Object start = invokeCompatible(factory, "a", record.startLong, book);
+            if (readShortPosition(start) != record.startShort) {
+                throw new IllegalStateException("native start position mismatch");
+            }
+            Object end = invokeCompatible(factory, "a", record.endLong, book);
+            int nativeEndShort = readShortPosition(end);
+            if (nativeEndShort == record.endShort) {
+                normalized.add(record);
+                continue;
+            }
+            if (nativeEndShort != 0 || record.endShort <= record.startShort) {
+                throw new IllegalStateException("native end position mismatch");
+            }
+            String previousLong = decrementLongPosition(record.endLong);
+            Object previousEnd = invokeCompatible(factory, "a", previousLong, book);
+            int previousShort = readShortPosition(previousEnd);
+            if (previousShort != record.endShort - 1
+                    || !previousLong.equals(String.valueOf(
+                        previousEnd.getClass().getMethod("nX").invoke(previousEnd)))) {
+                throw new IllegalStateException("terminal native end position is unresolved");
+            }
+            normalized.add(new Record(
+                record.startLong,
+                record.startShort,
+                previousLong,
+                previousShort,
+                record.note
+            ));
+            counters.terminalEndpointRepairs++;
+        }
+        return normalized;
+    }
+
+    private static Map<String, Boolean> normalizePreviousRanges(
+        Object contentSdk,
+        Object book,
+        Map<String, Boolean> previous
+    ) throws Exception {
+        Map<String, Boolean> normalized = new HashMap<String, Boolean>();
+        Object factory = invokeCompatible(contentSdk, "E", book);
+        for (Map.Entry<String, Boolean> entry : previous.entrySet()) {
+            String[] positions = splitRangeKey(entry.getKey());
+            String endLong = positions[1];
+            Object end = invokeCompatible(factory, "a", endLong, book);
+            if (readShortPosition(end) == 0) {
+                String candidateLong = decrementLongPosition(endLong);
+                Object candidate = invokeCompatible(factory, "a", candidateLong, book);
+                if (readShortPosition(candidate) > 0
+                        && candidateLong.equals(String.valueOf(
+                            candidate.getClass().getMethod("nX").invoke(candidate)))) {
+                    endLong = candidateLong;
+                }
+            }
+            normalized.put(pairKey(positions[0], endLong), entry.getValue());
+        }
+        return normalized;
+    }
+
+    private static String decrementLongPosition(String encoded) {
+        final String alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        if (encoded == null || encoded.length() != 12) {
+            throw new IllegalArgumentException("invalid native long position");
+        }
+        byte[] raw = new byte[9];
+        for (int group = 0; group < 3; group++) {
+            int base = group * 4;
+            int value = 0;
+            for (int index = 0; index < 4; index++) {
+                int digit = alphabet.indexOf(encoded.charAt(base + index));
+                if (digit < 0) {
+                    throw new IllegalArgumentException("invalid native long position");
+                }
+                value = (value << 6) | digit;
+            }
+            raw[group * 3] = (byte) ((value >>> 16) & 0xff);
+            raw[group * 3 + 1] = (byte) ((value >>> 8) & 0xff);
+            raw[group * 3 + 2] = (byte) (value & 0xff);
+        }
+        if ((raw[5] | raw[6] | raw[7] | raw[8]) == 0) {
+            throw new IllegalArgumentException("native long position offset is zero");
+        }
+        for (int index = 5; index <= 8; index++) {
+            int value = raw[index] & 0xff;
+            if (value > 0) {
+                raw[index] = (byte) (value - 1);
+                break;
+            }
+            raw[index] = (byte) 0xff;
+        }
+        StringBuilder result = new StringBuilder(12);
+        for (int group = 0; group < 3; group++) {
+            int value = ((raw[group * 3] & 0xff) << 16)
+                | ((raw[group * 3 + 1] & 0xff) << 8)
+                | (raw[group * 3 + 2] & 0xff);
+            result.append(alphabet.charAt((value >>> 18) & 0x3f));
+            result.append(alphabet.charAt((value >>> 12) & 0x3f));
+            result.append(alphabet.charAt((value >>> 6) & 0x3f));
+            result.append(alphabet.charAt(value & 0x3f));
+        }
+        return result.toString();
     }
 
     private static void deleteExisting(
@@ -394,7 +564,11 @@ public final class GoodreadsAnnotationAgentV15 {
         int type,
         String start,
         String end,
-        boolean ksdkDualWriteAvailable,
+        Object kppBook,
+        String nativePath,
+        boolean notifyKpp,
+        boolean ksdkEnabled,
+        boolean whisperStoreEnabled,
         Counters counters
     ) throws Exception {
         String key = typedKey(type, start, end);
@@ -405,9 +579,12 @@ public final class GoodreadsAnnotationAgentV15 {
         if (!invokeBoolean(manager, "g", annotation, book)) {
             throw new IllegalStateException("native annotation delete rejected");
         }
-        notifyNativeReader(readerSdk, annotation, book, "DELETE",
-            ksdkDualWriteAvailable, counters);
-        syncCloudEdit(annotation, book, "DELETE", counters);
+        if (notifyKpp) {
+            notifyNativeReader(readerSdk, annotation, kppBook, "DELETE",
+                false, counters);
+        }
+        syncNativeCloudEdit(readerSdk, annotation, book, nativePath, "DELETE",
+            ksdkEnabled, whisperStoreEnabled, counters);
         existing.remove(key);
         if (type == 1) {
             counters.highlightsDeleted++;
@@ -437,6 +614,25 @@ public final class GoodreadsAnnotationAgentV15 {
             invokeKsdkProxy(proxy, annotation, book, operation);
             counters.ksdkWrites++;
         }
+        notifyKppReader(readerSdk, annotation, book, operationName, counters);
+    }
+
+    private static void notifyKppReader(
+        Object readerSdk,
+        Object annotation,
+        Object book,
+        String operationName,
+        Counters counters
+    ) throws Exception {
+        Object proxy = invokeCompatible(readerSdk, "xB");
+        if (proxy == null) {
+            throw new IllegalStateException("native annotation proxy unavailable");
+        }
+        Class<?> operationType = Class.forName(
+            "com.amazon.ebook.booklet.reader.impl.annotation.AnnotationWriteOperationType"
+        );
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        Object operation = Enum.valueOf((Class) operationType, operationName);
         Class<?> bookDataType = Class.forName(
             "com.amazon.ebook.booklet.reader.impl.annotation.proxy.BookData"
         );
@@ -473,6 +669,173 @@ public final class GoodreadsAnnotationAgentV15 {
         Object operation = Enum.valueOf((Class) operationType, operationName);
         invokeKsdkProxy(proxy, annotation, book, operation);
         counters.ksdkWrites++;
+    }
+
+    private static void syncNativeCloudEdit(
+        Object readerSdk,
+        Object annotation,
+        Object book,
+        String nativePath,
+        String operationName,
+        boolean ksdkEnabled,
+        boolean whisperStoreEnabled,
+        Counters counters
+    ) throws Exception {
+        if (ksdkEnabled) {
+            syncKsdkEdit(readerSdk, annotation, book, operationName, counters);
+        } else {
+            journalLegacyEdit(readerSdk, annotation, book, nativePath, operationName);
+            counters.nativeJournalEdits++;
+        }
+        if (whisperStoreEnabled) {
+            syncCloudEdit(annotation, book, operationName, counters);
+        }
+    }
+
+    private static void journalLegacyEdit(
+        Object readerSdk,
+        Object annotation,
+        Object book,
+        String nativePath,
+        String operationName
+    ) throws Exception {
+        Object export = annotation.getClass().getMethod("Ci").invoke(annotation);
+        Object sdkJournalType = annotation.getClass().getMethod("CS").invoke(annotation);
+        Class<?> annotationSyncType = Class.forName(
+            "com.amazon.ebook.booklet.reader.impl.annotation.AnnotationSync"
+        );
+        Method mapJournalType = null;
+        for (Method method : annotationSyncType.getDeclaredMethods()) {
+            Class<?>[] parameters = method.getParameterTypes();
+            if (method.getName().equals("a") && parameters.length == 1
+                    && parameters[0].getName().equals(
+                        "com.amazon.ebook.booklet.reader.sdk.content.annotation.JournalType")
+                    && method.getReturnType().getName().equals(
+                        "com.amazon.kindle.content.journal.JournalType")) {
+                mapJournalType = method;
+            }
+        }
+        if (mapJournalType == null) {
+            throw new IllegalStateException("native journaling helpers unavailable");
+        }
+        mapJournalType.setAccessible(true);
+        Object journalType = mapJournalType.invoke(null, sdkJournalType);
+
+        Class<?> actionType = Class.forName("com.amazon.kindle.content.journal.JournalAction");
+        String actionField = "CREATE".equals(operationName) ? "gbb"
+            : ("DELETE".equals(operationName) ? "gbc" : "gbd");
+        Object action = actionType.getField(actionField).get(null);
+        Class<?> journalingServiceType = Class.forName(
+            "com.amazon.kindle.content.journal.JournalingService"
+        );
+        Object service = invokeOptional(readerSdk, "getService", journalingServiceType);
+        if (service == null) {
+            Class<?> framework = Class.forName("com.amazon.kindle.restricted.runtime.Framework");
+            service = framework.getMethod("getService", Class.class)
+                .invoke(null, journalingServiceType);
+        }
+        if (service == null) {
+            Object context = invokeOptional(readerSdk, "xn");
+            if (context != null) {
+                service = invokeOptional(context, "getService", journalingServiceType);
+            }
+        }
+        if (service == null) {
+            throw new IllegalStateException("native journaling service unavailable");
+        }
+
+        Object bookMetadata = book.getClass().getMethod("jg").invoke(book);
+        String cdeKey = String.valueOf(
+            bookMetadata.getClass().getMethod("getCdeKey").invoke(bookMetadata));
+        String cdeType = String.valueOf(
+            bookMetadata.getClass().getMethod("getCdeType").invoke(bookMetadata));
+        Integer version = (Integer) bookMetadata.getClass()
+            .getMethod("getVersion").invoke(bookMetadata);
+        String guid = String.valueOf(
+            bookMetadata.getClass().getMethod("getGUID").invoke(bookMetadata));
+        int bookFormat = ((Integer) book.getClass().getMethod("jm").invoke(book)).intValue();
+        String format = bookFormat == 0 ? "mobi7"
+            : bookFormat == 1 ? "mobi8"
+            : bookFormat == 2 ? "topaz"
+            : bookFormat == 3 ? "pdf"
+            : bookFormat == 4 ? "YJBinary" : null;
+        if (cdeKey.length() == 0 || cdeType.length() == 0 || guid.length() == 0
+                || format == null) {
+            throw new IllegalStateException("native journal identity unavailable");
+        }
+        Object journaledBook = invokeCompatible(
+            service, "a", nativePath, cdeKey, cdeType, version, guid, format);
+        if (journalType == null || journaledBook == null) {
+            throw new IllegalStateException("native journal book unavailable");
+        }
+
+        Class<?> exportType = export.getClass();
+        Object entry = invokeCompatibleNullable(
+            service,
+            "a",
+            journalType,
+            action,
+            exportType.getField("czc").get(export),
+            exportType.getField("czd").get(export),
+            exportType.getField("czf").get(export),
+            exportType.getField("metadata").get(export),
+            exportType.getField("pos").get(export),
+            Long.valueOf(-1L),
+            Long.valueOf(-1L),
+            exportType.getField("cze").get(export),
+            exportType.getField("czg").get(export)
+        );
+        if (entry == null) {
+            throw new IllegalStateException("native journal entry unavailable");
+        }
+        invokeCompatible(service, "a", journaledBook, entry);
+    }
+
+    private static Object invokeCompatibleNullable(
+        Object target,
+        String name,
+        Object... arguments
+    ) throws Exception {
+        for (Method method : target.getClass().getMethods()) {
+            Class<?>[] parameters = method.getParameterTypes();
+            if (!method.getName().equals(name) || parameters.length != arguments.length) {
+                continue;
+            }
+            boolean matches = true;
+            for (int index = 0; index < parameters.length; index++) {
+                if (arguments[index] == null) {
+                    if (parameters[index].isPrimitive()) matches = false;
+                } else if (!compatible(
+                        new Class<?>[] { parameters[index] },
+                        new Object[] { arguments[index] })) {
+                    matches = false;
+                }
+            }
+            if (matches) return method.invoke(target, arguments);
+        }
+        throw new NoSuchMethodException(name);
+    }
+
+    private static void requestNativeCloudUpload(Object readerSdk, Counters counters)
+            throws Exception {
+        Class<?> whisperSyncType = Class.forName(
+            "com.amazon.kindle.restricted.webservices.whispersync.v1.WhisperSyncV1"
+        );
+        Object service = invokeCompatible(readerSdk, "getService", whisperSyncType);
+        if (service == null) {
+            throw new IllegalStateException("native WhisperSync service unavailable");
+        }
+        invokeCompatible(service, "bdl");
+        counters.nativeUploadRequests++;
+    }
+
+    private static boolean invokeStaticBoolean(String className, String methodName)
+            throws Exception {
+        Object value = Class.forName(className).getMethod(methodName).invoke(null);
+        if (!(value instanceof Boolean)) {
+            throw new IllegalStateException("native feature flag unavailable");
+        }
+        return ((Boolean) value).booleanValue();
     }
 
     private static void invokeKsdkProxy(
@@ -671,6 +1034,18 @@ public final class GoodreadsAnnotationAgentV15 {
         }
     }
 
+    private static boolean bookMatchesPath(Object book, String nativePath) {
+        if (book == null || nativePath == null) {
+            return false;
+        }
+        try {
+            Object path = book.getClass().getMethod("getPath").invoke(book);
+            return nativePath.equals(String.valueOf(path));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     private static int readShortPosition(Object position) throws Exception {
         return ((Integer) position.getClass().getMethod("UF").invoke(position)).intValue();
     }
@@ -689,8 +1064,12 @@ public final class GoodreadsAnnotationAgentV15 {
         Object manager,
         Object readerSdk,
         Object book,
+        Object kppBook,
+        String nativePath,
         List<Record> desired,
-        boolean ksdkDualWriteAvailable,
+        boolean notifyKpp,
+        boolean ksdkEnabled,
+        boolean whisperStoreEnabled,
         Counters counters
     ) throws Exception {
         for (Object annotation : new ArrayList<Object>(annotations)) {
@@ -721,8 +1100,12 @@ public final class GoodreadsAnnotationAgentV15 {
             if (!invokeBoolean(manager, "g", annotation, book)) {
                 throw new IllegalStateException("generation 6 annotation cleanup rejected");
             }
-            notifyNativeReader(readerSdk, annotation, book, "DELETE",
-                ksdkDualWriteAvailable, counters);
+            if (notifyKpp) {
+                notifyNativeReader(readerSdk, annotation, kppBook, "DELETE",
+                    false, counters);
+            }
+            syncNativeCloudEdit(readerSdk, annotation, book, nativePath, "DELETE",
+                ksdkEnabled, whisperStoreEnabled, counters);
             counters.zeroEndpointRepairs++;
             if (type == 1) {
                 counters.highlightsDeleted++;
@@ -741,20 +1124,26 @@ public final class GoodreadsAnnotationAgentV15 {
      */
     private static void purgeGenerationSixCloudAnnotations(
         Object contentSdk,
+        Object readerSdk,
         Object book,
+        String nativePath,
         List<Record> desired,
         Map<String, Boolean> previous,
+        boolean notifyKpp,
+        boolean ksdkEnabled,
+        boolean whisperStoreEnabled,
         Counters counters
     ) throws Exception {
         for (Record record : desired) {
             Object start = makePosition(contentSdk, book, record.startLong, record.startShort);
-            Object brokenEnd = makePosition(contentSdk, book, record.endLong, 0);
+            Object brokenEnd = makeLegacyBrokenPosition(contentSdk, book, record.endLong);
             Object brokenHighlight = construct(
                 "com.amazon.ebook.booklet.reader.impl.annotation.personal.Highlight",
                 start,
                 brokenEnd
             );
-            syncCloudEdit(brokenHighlight, book, "DELETE", counters);
+            syncNativeCloudEdit(readerSdk, brokenHighlight, book, nativePath, "DELETE",
+                ksdkEnabled, whisperStoreEnabled, counters);
             counters.legacyCloudDeletes++;
 
             boolean hadNote = record.note.length() > 0
@@ -766,7 +1155,8 @@ public final class GoodreadsAnnotationAgentV15 {
                     start,
                     brokenEnd
                 );
-                syncCloudEdit(brokenNote, book, "DELETE", counters);
+                syncNativeCloudEdit(readerSdk, brokenNote, book, nativePath, "DELETE",
+                    ksdkEnabled, whisperStoreEnabled, counters);
                 counters.legacyCloudDeletes++;
             }
         }
@@ -997,10 +1387,13 @@ public final class GoodreadsAnnotationAgentV15 {
         private int notesDeleted;
         private int nativeNotifications;
         private int zeroEndpointRepairs;
+        private int terminalEndpointRepairs;
         private int cloudEdits;
         private int legacyCloudDeletes;
         private int cloudSnapshots;
         private int ksdkWrites;
+        private int nativeJournalEdits;
+        private int nativeUploadRequests;
 
         private void write(PrintWriter out) {
             out.println("highlights_created=" + highlightsCreated);
@@ -1010,10 +1403,13 @@ public final class GoodreadsAnnotationAgentV15 {
             out.println("notes_deleted=" + notesDeleted);
             out.println("native_notifications=" + nativeNotifications);
             out.println("zero_endpoint_repairs=" + zeroEndpointRepairs);
+            out.println("terminal_endpoint_repairs=" + terminalEndpointRepairs);
             out.println("cloud_edits=" + cloudEdits);
             out.println("legacy_cloud_deletes=" + legacyCloudDeletes);
             out.println("cloud_snapshots=" + cloudSnapshots);
             out.println("ksdk_writes=" + ksdkWrites);
+            out.println("native_journal_edits=" + nativeJournalEdits);
+            out.println("native_upload_requests=" + nativeUploadRequests);
         }
     }
 }
