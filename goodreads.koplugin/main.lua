@@ -124,6 +124,7 @@ local DEBUG_FIELD_ORDER = {
     "sync_enqueued",
     "interval_seconds",
     "attempt",
+    "duplicates_collapsed",
 }
 local DEBUG_ALLOWED_FIELDS = {}
 for _, key in ipairs(DEBUG_FIELD_ORDER) do
@@ -505,6 +506,44 @@ local function readAnnotationState(asin)
 end
 
 
+function Goodreads:collectDesiredAnnotations(annotations)
+    local desired = {}
+    local by_range = {}
+    local duplicates_collapsed = 0
+    for _, item in ipairs(annotations or {}) do
+        if item.drawer and type(item.pos0) == "string" and type(item.pos1) == "string" then
+            local note = type(item.note) == "string" and item.note or ""
+            if #note > 65536 then
+                return nil, nil, nil, "one annotation note exceeds the safe sync limit"
+            end
+            local first = item.pos0 < item.pos1 and item.pos0 or item.pos1
+            local second = item.pos0 < item.pos1 and item.pos1 or item.pos0
+            local range_key = first .. "\0" .. second
+            local existing = by_range[range_key]
+            if existing then
+                duplicates_collapsed = duplicates_collapsed + 1
+                if existing.note == "" and note ~= "" then
+                    existing.note = note
+                end
+            else
+                local normalized = {
+                    start = item.pos0,
+                    finish = item.pos1,
+                    note = note,
+                }
+                by_range[range_key] = normalized
+                table.insert(desired, normalized)
+            end
+        end
+    end
+
+    local note_bytes = 0
+    for _, item in ipairs(desired) do
+        note_bytes = note_bytes + #item.note
+    end
+    return desired, note_bytes, duplicates_collapsed
+end
+
 function Goodreads:captureAnnotationSnapshot(reader, trigger)
     if not self.settings.annotation_sync_enabled then
         return nil, "annotation sync disabled"
@@ -521,24 +560,22 @@ function Goodreads:captureAnnotationSnapshot(reader, trigger)
     end
 
     local annotations = reader.annotation and reader.annotation.annotations or {}
-    local desired = {}
-    local note_bytes = 0
-    for _, item in ipairs(annotations) do
-        if item.drawer and type(item.pos0) == "string" and type(item.pos1) == "string" then
-            local note = type(item.note) == "string" and item.note or ""
-            if #note > 65536 then
-                return nil, "one annotation note exceeds the safe sync limit"
-            end
-            note_bytes = note_bytes + #note
-            table.insert(desired, {
-                start = item.pos0,
-                finish = item.pos1,
-                note = note,
-            })
-        end
+    local desired, note_bytes, duplicates_collapsed, collect_error =
+        self:collectDesiredAnnotations(annotations)
+    if not desired then
+        return nil, collect_error
     end
     if #desired > 1000 or note_bytes > 200 * 1024 then
         return nil, "annotation payload exceeds the safe sync limit"
+    end
+    if duplicates_collapsed > 0 then
+        self:debugLog("annotations_deduplicated", {
+            trigger = trigger,
+            asin = asin,
+            annotations = #desired,
+            duplicates_collapsed = duplicates_collapsed,
+            status = "exact_ranges_collapsed",
+        })
     end
 
     local token = (self.annotation_snapshot_tokens[asin] or 0) + 1

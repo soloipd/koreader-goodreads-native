@@ -289,6 +289,30 @@ assert(active.last_annotation_event.stats.notes == 1, "note totals should be cou
 assert(active.last_annotation_event.stats.bookmarks == 1, "bookmark totals should be counted")
 assert(active.last_annotation_event.text == nil, "annotation text must never enter diagnostics state")
 
+local duplicate_ranges = {
+    { drawer = "lighten", pos0 = "/body/p[1].0", pos1 = "/body/p[1].10" },
+    { drawer = "lighten", pos0 = "/body/p[1].0", pos1 = "/body/p[1].10" },
+    {
+        drawer = "underscore",
+        pos0 = "/body/p[2].20",
+        pos1 = "/body/p[2].5",
+        note = "",
+    },
+    {
+        drawer = "underscore",
+        pos0 = "/body/p[2].5",
+        pos1 = "/body/p[2].20",
+        note = "note retained without logging its text",
+    },
+}
+local normalized_ranges, normalized_note_bytes, collapsed_ranges =
+    active:collectDesiredAnnotations(duplicate_ranges)
+assert(#normalized_ranges == 2, "exact and reversed duplicate ranges must collapse")
+assert(collapsed_ranges == 2, "duplicate collapse count must be observable")
+assert(normalized_ranges[2].note ~= "", "a non-empty duplicate note must be retained")
+assert(normalized_note_bytes == #normalized_ranges[2].note,
+    "payload limits must count only retained duplicate-note bytes")
+
 -- Only one native annotation agent may run at once. New changes for the same
 -- book must replace the queued snapshot, while changes for another book remain
 -- queued behind it.

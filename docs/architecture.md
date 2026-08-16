@@ -89,7 +89,9 @@ EID and unambiguous base PID as `data-kfx-*` attributes. A batched helper walks
 KOReader's normalized EPUB XPointer, counts Unicode characters from the nearest
 KFX anchor, and emits the exact native short and long positions.
 
-The annotation agent requires ReaderSDK's active book to match both the ASIN
+Before translation, the plugin collapses exact and endpoint-reversed duplicate
+KOReader ranges and retains a non-empty note from either copy. The annotation
+agent requires ReaderSDK's active book to match both the ASIN
 and explicit native KFX path, reconciles highlight and note objects through
 `AnnotationManager`, and notifies the KPP proxy. It
 then reads the firmware's runtime feature flags. KSDK-enabled releases use the

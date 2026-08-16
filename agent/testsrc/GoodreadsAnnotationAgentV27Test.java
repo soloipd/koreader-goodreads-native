@@ -13,7 +13,7 @@ import java.util.List;
 import java.util.Map;
 import testsupport.Fakes;
 
-public final class GoodreadsAnnotationAgentV26Test {
+public final class GoodreadsAnnotationAgentV27Test {
     private static final String ASIN = "B0FLB24198";
     private static final String START = "AAAAAAAAAAAA";
     private static final String END = "AAAAAAAAAAAB";
@@ -26,7 +26,7 @@ public final class GoodreadsAnnotationAgentV26Test {
     private static final String TERMINAL_END_NORMALIZED = "ATwFAAD3AgAA";
     private static int requestSequence = 10000000;
 
-    private GoodreadsAnnotationAgentV26Test() {}
+    private GoodreadsAnnotationAgentV27Test() {}
 
     public static void main(String[] ignored) throws Exception {
         Fakes.SDK sdk = new Fakes.SDK();
@@ -222,6 +222,9 @@ public final class GoodreadsAnnotationAgentV26Test {
         Map<String, String> rejected = run(reversedSdk, malformed, previous());
         expect("false", rejected.get("success"), "malformed position must fail");
         expect("validate_payload", rejected.get("failed_stage"), "malformed input must fail before opening");
+        expect(ASIN, rejected.get("asin"), "payload failures must retain their correlation ASIN");
+        expect(true, rejected.get("request_id") != null,
+            "payload failures must retain their correlation request ID");
         expect(beforeMalformed, reversedSdk.content.manager.annotations.size(), "malformed input must not mutate native state");
 
         System.out.println("Annotation agent behavior tests passed.");
@@ -278,7 +281,7 @@ public final class GoodreadsAnnotationAgentV26Test {
         Path result = Paths.get("/tmp/goodreads-annotation-result-" + requestId + ".log");
         Files.write(path, payload, StandardCharsets.ISO_8859_1);
         Files.deleteIfExists(result);
-        GoodreadsAnnotationAgentV26.agentmain(path.toString(), null);
+        GoodreadsAnnotationAgentV27.agentmain(path.toString(), null);
         expect(false, Files.exists(path), "agent must remove payload after loading it");
         Map<String, String> fields = readResult(result);
         Files.deleteIfExists(result);

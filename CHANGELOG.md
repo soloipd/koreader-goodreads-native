@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-08-16
+
+### Fixed
+
+- Exact and endpoint-reversed duplicate KOReader annotation ranges are now
+  collapsed before translation and native reconciliation. If only one copy has
+  a note, that note is retained. Rapid create/delete sequences can therefore
+  coalesce to their latest state without the native agent rejecting the batch.
+- Annotation validation failures now report their ASIN and request ID as soon
+  as those fields are validated, allowing the queue to correlate failures
+  immediately instead of waiting for the native-agent timeout.
+
 ## [0.4.0] - 2026-08-16
 
 ### Fixed
