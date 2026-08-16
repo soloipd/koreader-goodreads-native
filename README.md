@@ -22,6 +22,8 @@ account token is required or stored.
 - Offers a one-time 1–5 star chooser when a book is completed.
 - Supports manual rating updates and clearing an existing rating.
 - Suppresses duplicate percentage updates per ASIN.
+- Collapses duplicate highlight ranges while preserving an attached note, so
+  rapid edits and removals converge on the latest KOReader state.
 - Keeps shelf and percentage synchronization independently configurable.
 - Provides opt-in, redacted, rotating diagnostics and an on-device status view.
 - Uses only the Kindle's native authenticated services.

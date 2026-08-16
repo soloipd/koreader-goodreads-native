@@ -20,8 +20,8 @@ import java.util.Properties;
 import java.util.Set;
 
 /** Reconciles KOReader highlights with the native Kindle annotation store. */
-public final class GoodreadsAnnotationAgentV26 {
-    private GoodreadsAnnotationAgentV26() {}
+public final class GoodreadsAnnotationAgentV27 {
+    private GoodreadsAnnotationAgentV27() {}
 
     public static void agentmain(String payloadPath, Instrumentation instrumentation) {
         PrintWriter out;
@@ -43,6 +43,8 @@ public final class GoodreadsAnnotationAgentV26 {
             if (!payloadPath.equals("/tmp/goodreads-annotations-" + requestId + ".properties")) {
                 throw new IllegalArgumentException("request ID does not match payload path");
             }
+            out.println("asin=" + asin);
+            out.println("request_id=" + requestId);
             String nativePath = requireNativePath(decodeHex(payload.getProperty("native_path_hex", "")));
             boolean repairZeroEndpoint = "true".equals(
                 payload.getProperty("repair_zero_endpoint"));
@@ -52,8 +54,6 @@ public final class GoodreadsAnnotationAgentV26 {
                 payload.getProperty("purge_legacy_cloud"));
             List<Record> desired = readRecords(payload, "desired");
             Map<String, Boolean> previous = readPrevious(payload, "previous");
-            out.println("asin=" + asin);
-            out.println("request_id=" + requestId);
             out.println("requested=" + desired.size());
 
             stage = "resolve_reader_sdk";

@@ -8,7 +8,7 @@ set -u
 
 JAVA_BIN="/usr/java/bin/java"
 PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
-AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v26.jar"
+AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v27.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
 STATE_DIR="/mnt/us/koreader/settings/goodreads_native_annotations"
 PENDING_DIR="/mnt/us/koreader/settings/goodreads_native_annotations_pending"
@@ -96,7 +96,7 @@ esac
 
 state_file="$STATE_DIR/$asin"
 state_temp="$state_file.$$"
-if ! grep -Fqx 'agent_generation=26' "$state_file" 2>/dev/null; then
+if ! grep -Fqx 'agent_generation=27' "$state_file" 2>/dev/null; then
     if ! printf '%s\n' 'force_cloud_replay=true' >>"$payload"; then
         exit 8
     fi
@@ -104,7 +104,7 @@ if ! grep -Fqx 'agent_generation=26' "$state_file" 2>/dev/null; then
     # identities. Do not reconstruct those synthetic records again merely
     # because a newer agent needs to replay valid records into an exact book
     # identity. Fresh/older installs still receive the one-time cleanup.
-    if ! grep -Eq '^agent_generation=(18|19|20|21|22|23|24|25|26)$' "$state_file" 2>/dev/null; then
+    if ! grep -Eq '^agent_generation=(18|19|20|21|22|23|24|25|26|27)$' "$state_file" 2>/dev/null; then
         if ! printf '%s\n' \
             'repair_zero_endpoint=true' \
             'purge_legacy_cloud=true' >>"$payload"; then
@@ -113,7 +113,7 @@ if ! grep -Fqx 'agent_generation=26' "$state_file" 2>/dev/null; then
     fi
 fi
 if ! awk -F= '
-    BEGIN { print "agent_generation=26" }
+    BEGIN { print "agent_generation=27" }
     /^desired\.[0-9]+\.start=/ {
         key=$1; sub(/\.start$/, "", key); start[key]=$2
     }
