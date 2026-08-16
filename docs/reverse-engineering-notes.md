@@ -119,3 +119,18 @@ factory before persistence; constructing them directly can create a valid-lookin
 long coordinate with a zero short PID and an oversized location-1 highlight.
 Visibility remains governed by the Kindle/Amazon annotation pipeline; the
 plugin does not invent or override a public-sharing flag.
+
+### Background journal capability probe
+
+A read-only probe on firmware 5.19.5, run while KOReader was active and
+ReaderSDK reported no active native book, confirmed that ReaderSDK,
+`JournalingService`, and `WhisperSyncV1` were all available. The journal-book
+factory and journal-entry factory were also present. KSDK and WhisperStore
+remained disabled, so any background-write canary on this firmware must target
+the legacy journal lane.
+
+This is evidence of structural availability, not durability. The probe did not
+create, edit, delete, journal, or upload an annotation. A production background
+path remains blocked until a disposable canary can be observed both in the
+native reader and in the cloud, then deleted and observed absent through the
+same path.
