@@ -3,6 +3,12 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] - 2026-08-16
+
+### Changed
+
+- Use the GitHub identity `soloipd` in the MIT license attribution.
+
 ## [0.3.1] - 2026-08-16
 
 ### Fixed
