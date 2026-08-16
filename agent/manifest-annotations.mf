@@ -1,2 +1,2 @@
 Manifest-Version: 1.0
-Agent-Class: GoodreadsAnnotationAgentV27
+Agent-Class: GoodreadsAnnotationAgentV28

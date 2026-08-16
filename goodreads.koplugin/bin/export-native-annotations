@@ -5,7 +5,7 @@ set -u
 
 JAVA_BIN="/usr/java/bin/java"
 PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
-AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-export-agent-v2.jar"
+AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-export-agent-v3.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
 LOCK_DIR="/tmp/goodreads-annotation-export.lock"
 payload="${1:-}"

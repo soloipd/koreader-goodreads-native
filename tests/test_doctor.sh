@@ -13,7 +13,7 @@ proc="$test_root/proc"
 mkdir -p "$plugin/bin" "$state/annotation-outbox" "$state/native-import" \
     "$state/pending" "$proc"
 printf '%s\n' '0.9.0' >"$plugin/VERSION"
-: >"$plugin/bin/goodreads-annotation-export-agent-v2.jar"
+: >"$plugin/bin/goodreads-annotation-export-agent-v3.jar"
 : >"$state/native-import-enabled"
 
 # Filenames and contents deliberately contain values that must never escape in

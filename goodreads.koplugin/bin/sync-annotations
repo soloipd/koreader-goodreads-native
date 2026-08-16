@@ -8,7 +8,7 @@ set -u
 
 JAVA_BIN="/usr/java/bin/java"
 PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
-AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v27.jar"
+AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v28.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
 STATE_DIR="/mnt/us/koreader/settings/goodreads_native_annotations"
 PENDING_DIR="/var/local/koreader-goodreads-native/annotation-pending"
@@ -179,7 +179,7 @@ write_receipt() {
         "note_count=$note_count" \
         "retry_count=$retry_count" \
         "retry_reason=$failed_stage" \
-        'agent_generation=27' \
+        'agent_generation=28' \
         "trigger=$trigger" \
         "local_verified=$local_verified" \
         "native_notified=$native_notified" \
@@ -261,7 +261,7 @@ esac
 
 state_file="$STATE_DIR/$asin"
 state_temp="$state_file.$$"
-if ! grep -Fqx 'agent_generation=27' "$state_file" 2>/dev/null; then
+if ! grep -Fqx 'agent_generation=28' "$state_file" 2>/dev/null; then
     if ! printf '%s\n' 'force_cloud_replay=true' >>"$payload"; then
         exit 8
     fi
@@ -269,7 +269,7 @@ if ! grep -Fqx 'agent_generation=27' "$state_file" 2>/dev/null; then
     # identities. Do not reconstruct those synthetic records again merely
     # because a newer agent needs to replay valid records into an exact book
     # identity. Fresh/older installs still receive the one-time cleanup.
-    if ! grep -Eq '^agent_generation=(18|19|20|21|22|23|24|25|26|27)$' "$state_file" 2>/dev/null; then
+    if ! grep -Eq '^agent_generation=(18|19|20|21|22|23|24|25|26|27|28)$' "$state_file" 2>/dev/null; then
         if ! printf '%s\n' \
             'repair_zero_endpoint=true' \
             'purge_legacy_cloud=true' >>"$payload"; then
@@ -278,20 +278,30 @@ if ! grep -Fqx 'agent_generation=27' "$state_file" 2>/dev/null; then
     fi
 fi
 if ! awk -F= '
-    BEGIN { print "agent_generation=27" }
+    BEGIN { print "agent_generation=28" }
     /^desired\.[0-9]+\.start=/ {
         key=$1; sub(/\.start$/, "", key); start[key]=$2
     }
+    /^desired\.[0-9]+\.start_short=/ {
+        key=$1; sub(/\.start_short$/, "", key); start_short[key]=$2
+    }
     /^desired\.[0-9]+\.end=/ {
         key=$1; sub(/\.end$/, "", key); finish[key]=$2
+    }
+    /^desired\.[0-9]+\.end_short=/ {
+        key=$1; sub(/\.end_short$/, "", key); end_short[key]=$2
     }
     /^desired\.[0-9]+\.note_hex=/ {
         key=$1; sub(/\.note_hex$/, "", key); note[key]=($2 == "" ? "0" : "1")
     }
     END {
         for (key in start) {
-            if (finish[key] != "") print start[key] ":" finish[key] ":" note[key]
+            if (finish[key] != "" && start_short[key] != "" && end_short[key] != "") {
+                identity=start[key] "@" start_short[key] ":" finish[key] "@" end_short[key]
+                if (!(identity in state) || note[key] == "1") state[identity]=note[key]
+            }
         }
+        for (identity in state) print identity ":" state[identity]
     }
 ' "$payload" >"$state_temp"; then
     exit 8

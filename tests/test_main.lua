@@ -498,10 +498,14 @@ local import_snapshot = {
     asin = "B0FLB24198",
     snapshot_complete = true,
     items = {
-        { start_long = "AAAAAAAAAAA1", end_long = "AAAAAAAAAAA2", note = "native fills empty" },
-        { start_long = "AAAAAAAAAAA3", end_long = "AAAAAAAAAAA4", note = "native conflict" },
-        { start_long = "AAAAAAAAAAA5", end_long = "AAAAAAAAAAA6", note = "" },
-        { start_long = "AAAAAAAAAAA7", end_long = "AAAAAAAAAAA8", note = "native new note" },
+        { start_long = "AAAAAAAAAAA1", start_short = 1,
+            end_long = "AAAAAAAAAAA2", end_short = 2, note = "native fills empty" },
+        { start_long = "AAAAAAAAAAA3", start_short = 3,
+            end_long = "AAAAAAAAAAA4", end_short = 4, note = "native conflict" },
+        { start_long = "AAAAAAAAAAA5", start_short = 5,
+            end_long = "AAAAAAAAAAA6", end_short = 6, note = "" },
+        { start_long = "AAAAAAAAAAA7", start_short = 7,
+            end_long = "AAAAAAAAAAA8", end_short = 8, note = "native new note" },
     },
 }
 local import_positions = {
@@ -573,7 +577,9 @@ local function completeNativeSnapshot(plugin_, reader_, specs, fixed_path)
     for _, spec in ipairs(specs) do
         table.insert(items, {
             start_long = string.format("A%011d", spec.id * 2 - 1),
+            start_short = spec.start_short or (spec.id * 2 - 1),
             end_long = string.format("A%011d", spec.id * 2),
+            end_short = spec.end_short or (spec.id * 2),
             note = spec.note or "",
         })
         table.insert(translated, {
@@ -589,6 +595,35 @@ local function completeNativeSnapshot(plugin_, reader_, specs, fixed_path)
     }, translated)
     return ok_, detail_, path
 end
+
+local exact_identity_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
+local exact_identity_reader, exact_identity_annotations = newImportReader()
+local exact_identity_path = "/tmp/goodreads-native-exact-identity-test"
+local exact_identity_file = assert(io.open(exact_identity_path, "w"))
+exact_identity_file:write("private exact identity fixture")
+exact_identity_file:close()
+assert(exact_identity_plugin:applyNativeAnnotationImport(exact_identity_reader, {
+    path = exact_identity_path,
+    asin = "B0FLB24198",
+    snapshot_complete = true,
+    items = {
+        { start_long = "AAAAAAAAAAA1", start_short = 100,
+            end_long = "AAAAAAAAAAA2", end_short = 200, note = "" },
+        { start_long = "AAAAAAAAAAA1", start_short = 101,
+            end_long = "AAAAAAAAAAA2", end_short = 201, note = "nearby" },
+    },
+}, {
+    { start = { xpointer = "/exact.1" }, ["end"] = { xpointer = "/exact.2" } },
+    { start = { xpointer = "/nearby.1" }, ["end"] = { xpointer = "/nearby.2" } },
+}))
+assert(#exact_identity_annotations == 2,
+    "nearby native ranges sharing coarse locations must both import")
+assert(exact_identity_annotations[1].goodreads_native_provenance.key
+    ~= exact_identity_annotations[2].goodreads_native_provenance.key,
+    "nearby imported ranges must retain distinct exact identities")
+assert(exact_identity_annotations[1].goodreads_native_provenance.version == 2
+    and exact_identity_annotations[2].goodreads_native_provenance.version == 2,
+    "new native provenance must use exact identity version 2")
 
 local owned_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
 local owned_reader, owned = newImportReader()
@@ -1090,7 +1125,7 @@ io.open = function(path, mode)
             "note_count=1",
             "retry_count=3",
             "retry_reason=private text must not be displayed",
-            "agent_generation=27",
+            "agent_generation=28",
             "local_verified=true",
             "journal_lane=legacy",
             "upload_requested=true",

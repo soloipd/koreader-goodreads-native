@@ -887,7 +887,9 @@ local function readAnnotationState(asin)
         return keys
     end
     for line in file:lines() do
-        if line:match("^A[%w%+/]+:A[%w%+/]+:[01]$") then
+        if line:match("^A[%w%+/]+@%d+:A[%w%+/]+@%d+:[01]$")
+            or line:match("^A[%w%+/]+:A[%w%+/]+:[01]$")
+        then
             table.insert(keys, line)
         end
     end
@@ -1546,7 +1548,13 @@ local function readNativeImportSnapshot(asin)
         end
         note_bytes = note_bytes + #note
         if note_bytes > 200 * 1024 then return nil, "native import notes exceed limit" end
-        table.insert(items, { start_long = start_long, end_long = end_long, note = note })
+        table.insert(items, {
+            start_long = start_long,
+            start_short = start_short,
+            end_long = end_long,
+            end_short = end_short,
+            note = note,
+        })
     end
     for key in pairs(fields) do
         if not allowed[key] then return nil, "unexpected native import field" end
@@ -1571,11 +1579,14 @@ end
 
 local function nativeAnnotationKey(item)
     if type(item) ~= "table" or type(item.start_long) ~= "string"
+        or type(item.start_short) ~= "number"
         or type(item.end_long) ~= "string"
+        or type(item.end_short) ~= "number"
     then
         return nil
     end
-    return item.start_long .. ":" .. item.end_long
+    return item.start_long .. "@" .. tostring(item.start_short)
+        .. ":" .. item.end_long .. "@" .. tostring(item.end_short)
 end
 
 local function xpointerRangeKey(pos0, pos1)
@@ -1587,13 +1598,23 @@ end
 
 local function validNativeKey(key)
     if type(key) ~= "string" then return false end
-    local start_long, end_long = key:match("^(A[%w%+/]+):(A[%w%+/]+)$")
+    local start_long, start_short, end_long, end_short =
+        key:match("^(A[%w%+/]+)@(%d+):(A[%w%+/]+)@(%d+)$")
+    if start_long then
+        start_short, end_short = tonumber(start_short), tonumber(end_short)
+        return #start_long == 12 and #end_long == 12
+            and start_short <= 2147483647 and end_short <= 2147483647
+    end
+    -- v0.9 and earlier stored only coarse long coordinates. Accept these
+    -- private keys during migration; every new snapshot rewrites them exactly.
+    start_long, end_long = key:match("^(A[%w%+/]+):(A[%w%+/]+)$")
     return start_long ~= nil and #start_long == 12 and #end_long == 12
 end
 
 local function validNativeProvenance(item)
     local provenance = type(item) == "table" and item.goodreads_native_provenance
-    if type(provenance) ~= "table" or provenance.version ~= 1
+    if type(provenance) ~= "table"
+        or (provenance.version ~= 1 and provenance.version ~= 2)
         or type(provenance.key) ~= "string"
         or type(provenance.highlight_created) ~= "boolean"
         or type(provenance.note_imported) ~= "boolean"
@@ -1611,7 +1632,7 @@ end
 local function setNativeProvenance(item, key, highlight_created, note_imported, note_value)
     item.goodreads_native_import = true -- retained for v0.7 sidecar compatibility
     item.goodreads_native_provenance = {
-        version = 1,
+        version = 2,
         key = key,
         highlight_created = highlight_created == true,
         note_imported = note_imported == true,
@@ -1736,6 +1757,10 @@ function Goodreads:applyNativeAnnotationImport(reader, snapshot, positions)
                 local changed = false
                 if provenance.key ~= native_key then
                     provenance.key = native_key
+                    changed = true
+                end
+                if provenance.version ~= 2 then
+                    provenance.version = 2
                     changed = true
                 end
                 if provenance.highlight_created
@@ -3208,7 +3233,7 @@ function Goodreads:showDiagnostics()
             lock_busy = true,
             user_discarded = true,
         }, "unavailable")
-        local agent_generation = receipt.agent_generation == "27" and "27" or "unknown"
+        local agent_generation = receipt.agent_generation == "28" and "28" or "unknown"
         local state_label = ({
             saved_locally = _("saved locally"),
             waiting_native = _("waiting for native reader"),

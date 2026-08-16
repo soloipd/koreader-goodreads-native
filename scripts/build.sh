@@ -7,8 +7,8 @@ source_dir="$project_root/agent/src"
 build_dir="$project_root/agent/build/jdk"
 classes_dir="$build_dir/classes"
 agent_jar="$project_root/goodreads.koplugin/bin/goodreads-progress-agent-v2.jar"
-annotation_agent_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-agent-v27.jar"
-annotation_export_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-export-agent-v2.jar"
+annotation_agent_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-agent-v28.jar"
+annotation_export_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-export-agent-v3.jar"
 launcher_class="$project_root/goodreads.koplugin/bin/classes/AttachLauncher.class"
 
 javac_bin="${JAVAC:-javac}"
@@ -26,22 +26,24 @@ find "$(dirname "$annotation_export_jar")" -maxdepth 1 -type f \
 "$javac_bin" --release 8 -d "$classes_dir" \
     "$source_dir/AttachLauncher.java" \
     "$source_dir/GoodreadsProgressAgentV2.java" \
-    "$source_dir/GoodreadsAnnotationAgentV27.java" \
-    "$source_dir/GoodreadsAnnotationExportAgentV2.java"
+    "$source_dir/GoodreadsAnnotationAgentV28.java" \
+    "$source_dir/GoodreadsAnnotationExportAgentV3.java"
 
 "$jar_bin" cfm "$agent_jar" "$project_root/agent/manifest-progress.mf" \
     -C "$classes_dir" GoodreadsProgressAgentV2.class \
     -C "$classes_dir" 'GoodreadsProgressAgentV2$RequestArguments.class'
 
 "$jar_bin" cfm "$annotation_agent_jar" "$project_root/agent/manifest-annotations.mf" \
-    -C "$classes_dir" GoodreadsAnnotationAgentV27.class \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV27$CloudAnnotationHandler.class' \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV27$Record.class' \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV27$Counters.class'
+    -C "$classes_dir" GoodreadsAnnotationAgentV28.class \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV28$CloudAnnotationHandler.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV28$Record.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV28$RangeEndpoint.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV28$RangeIdentity.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV28$Counters.class'
 
 "$jar_bin" cfm "$annotation_export_jar" "$project_root/agent/manifest-annotation-export.mf" \
-    -C "$classes_dir" GoodreadsAnnotationExportAgentV2.class \
-    -C "$classes_dir" 'GoodreadsAnnotationExportAgentV2$ExportRecord.class'
+    -C "$classes_dir" GoodreadsAnnotationExportAgentV3.class \
+    -C "$classes_dir" 'GoodreadsAnnotationExportAgentV3$ExportRecord.class'
 
 cp "$classes_dir/AttachLauncher.class" "$launcher_class"
 chmod 0644 "$agent_jar" "$annotation_agent_jar" "$annotation_export_jar" "$launcher_class"

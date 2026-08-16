@@ -3,6 +3,27 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.1] - 2026-08-16
+
+### Fixed
+
+- Distinct nearby highlights that share Kindle's coarse KFX locations now use
+  their exact short offsets as part of the durable identity. They are no
+  longer rejected or merged during KOReader-to-Kindle reconciliation.
+- If two EPUB ranges resolve to the same exact KFX range at a map boundary,
+  Kindle receives its one representable highlight with the non-empty note;
+  both source annotations remain untouched in KOReader.
+- Native Kindle export and KOReader import use the same exact identity, so a
+  note remains paired with the correct nearby highlight in both directions.
+- Generation-27 coordinate-only state and version-1 import provenance migrate
+  conservatively; annotation text is not added to state, receipts, or logs.
+
+### Tests
+
+- Added regressions for adjacent same-location highlights, exact note pairing,
+  exact-duplicate rejection, provenance migration, and the existing
+  1,000-annotation conflict/deletion stress suite.
+
 ## [0.9.0] - 2026-08-16
 
 ### Added
