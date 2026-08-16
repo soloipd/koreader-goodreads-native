@@ -57,6 +57,9 @@ package.preload["util"] = function()
         end,
     }
 end
+package.preload["annotationoutbox"] = function()
+    return assert(dofile(project_root .. "/goodreads.koplugin/annotationoutbox.lua"))
+end
 
 local ReaderUI = {
     onClose = function(reader)
@@ -97,6 +100,11 @@ local function newPlugin(settings)
         annotation_sync_inflight = nil,
         annotation_pending_snapshots = {},
         annotation_pending_order = {},
+        persistAnnotationOutbox = function(_, snapshot)
+            snapshot.sequence = snapshot.token
+            snapshot.outbox_checksum = string.rep("a", 64)
+            return true
+        end,
     }, { __index = Goodreads })
 end
 
@@ -414,7 +422,8 @@ assert(suspend_annotations == 1, "suspend should capture annotations before slee
 -- real pending file, and reject arbitrary values rather than displaying them.
 local original_open = io.open
 local receipt_path = "/mnt/us/koreader/settings/goodreads_native_sync_receipts/B0FLB24198"
-local pending_path = "/mnt/us/koreader/settings/goodreads_native_annotations_pending/B0FLB24198"
+local pending_path = assert(os.getenv("GOODREADS_PRIVATE_STATE_DIR"))
+    .. "/annotation-pending/B0FLB24198"
 io.open = function(path, mode)
     if path == receipt_path then
         local receipt_lines = {
@@ -431,6 +440,8 @@ io.open = function(path, mode)
             "journal_lane=legacy",
             "upload_requested=true",
             "sync_enqueued=true",
+            "outbox_sequence=12",
+            "outbox_acknowledged=true",
             "cloud_observed=unavailable",
         }
         return {
@@ -457,8 +468,116 @@ local receipt_message = shown_messages[#shown_messages] and shown_messages[#show
 assert(receipt_message:match("Durable annotation receipt"), "diagnostics must include durable receipts")
 assert(receipt_message:match("waiting for native reader"), "pending state must override a stale queued receipt")
 assert(receipt_message:match("Cloud observation: unavailable"), "upload must not imply cloud observation")
+assert(receipt_message:match("Outbox: sequence 12; acknowledged deletion true"),
+    "diagnostics must expose durable outbox acknowledgement")
 assert(not receipt_message:match("private text"), "receipt diagnostics must reject arbitrary values")
 io.open = original_open
+
+-- Exercise the real atomic storage implementation. Simulated interruption
+-- artifacts, a sequence file behind/ahead of the committed snapshot, and a
+-- corrupt previous snapshot must never prevent the newest state from winning.
+os.execute = original_execute
+local private_root = assert(os.getenv("GOODREADS_PRIVATE_STATE_DIR"))
+local outbox_dir = private_root .. "/annotation-outbox"
+local sequence_dir = private_root .. "/annotation-sequences"
+local storage_plugin = setmetatable({}, { __index = Goodreads })
+local storage_snapshot = {
+    asin = "B012345678",
+    epub_path = "/mnt/us/koreader/cache/kindle.koplugin/test.epub",
+    native_path = "/mnt/us/documents/Test_B012345678.kfx",
+    trigger = "fault_test",
+    desired = {
+        { start = "/body/p[1].0", finish = "/body/p[1].1", note = "" },
+    },
+}
+assert(storage_plugin:persistAnnotationOutbox(storage_snapshot))
+assert(storage_snapshot.sequence == 1, "first durable sequence must be one")
+
+local interrupted = assert(io.open(outbox_dir .. "/B012345678.interrupted", "w"))
+interrupted:write("partial write")
+interrupted:close()
+local sequence_file = assert(io.open(sequence_dir .. "/B012345678", "w"))
+sequence_file:write("50\n")
+sequence_file:close()
+storage_snapshot.desired[1].finish = "/body/p[1].2"
+assert(storage_plugin:persistAnnotationOutbox(storage_snapshot))
+assert(storage_snapshot.sequence == 51, "persisted sequence high-water mark must win")
+
+sequence_file = assert(io.open(sequence_dir .. "/B012345678", "w"))
+sequence_file:write("1\n")
+sequence_file:close()
+storage_snapshot.desired[1].finish = "/body/p[1].3"
+assert(storage_plugin:persistAnnotationOutbox(storage_snapshot))
+assert(storage_snapshot.sequence == 52, "valid committed outbox must repair a stale sequence file")
+
+local corrupt = assert(io.open(outbox_dir .. "/B012345678", "w"))
+corrupt:write("corrupt committed snapshot\n")
+corrupt:close()
+storage_snapshot.desired[1].finish = "/body/p[1].4"
+assert(storage_plugin:persistAnnotationOutbox(storage_snapshot))
+assert(storage_snapshot.sequence == 53, "sequence file must recover from a corrupt outbox")
+
+local handoff_stages = {
+    "after_body_write",
+    "after_checksum",
+    "after_envelope_write",
+    "after_outbox_commit",
+    "after_sequence_write",
+    "after_sequence_commit",
+}
+for index, stage in ipairs(handoff_stages) do
+    storage_snapshot.desired[1].finish = "/body/fault[" .. tostring(index) .. "]"
+    storage_plugin.annotation_outbox_fault_stage = stage
+    assert(not storage_plugin:persistAnnotationOutbox(storage_snapshot),
+        "fault stage must interrupt persistence: " .. stage)
+    storage_plugin.annotation_outbox_fault_stage = nil
+    assert(storage_plugin:persistAnnotationOutbox(storage_snapshot),
+        "next launch must recover after interruption: " .. stage)
+end
+assert(storage_snapshot.sequence == 62, "handoff recovery must preserve monotonic sequence state")
+
+for transition = 1, 1000 do
+    storage_snapshot.desired[1].finish = "/body/p[1]." .. tostring(transition + 4)
+    storage_snapshot.desired[1].note = transition % 2 == 0 and "latest private note" or ""
+    assert(storage_plugin:persistAnnotationOutbox(storage_snapshot))
+end
+assert(storage_snapshot.sequence == 1062, "1,000 replacements must remain monotonic")
+local final_file = assert(original_open(outbox_dir .. "/B012345678", "rb"))
+local final_content = final_file:read("*a")
+final_file:close()
+local outbox_codec = assert(package.loaded.annotationoutbox)
+local final_body, final_checksum = assert(outbox_codec.split(final_content))
+local final_snapshot = assert(outbox_codec.parse(final_body, "B012345678"))
+assert(final_snapshot.sequence == 1062, "final outbox must contain the newest sequence")
+assert(final_snapshot.desired[1].finish == storage_snapshot.desired[1].finish,
+    "final outbox must contain the newest range")
+assert(final_snapshot.desired[1].note == storage_snapshot.desired[1].note,
+    "final outbox must contain the newest note edit/removal")
+assert(#final_checksum == 64, "final outbox must carry a SHA-256 checksum")
+local checksum_input = private_root .. "/checksum-input"
+local checksum_file = assert(original_open(checksum_input, "wb"))
+checksum_file:write(final_body)
+checksum_file:close()
+local checksum_pipe = assert(io.popen(
+    assert(os.getenv("GOODREADS_SHA256_TOOL")) .. " " .. checksum_input,
+    "r"
+))
+local computed_checksum = assert(checksum_pipe:read("*l")):match("^([0-9a-f]+)")
+checksum_pipe:close()
+assert(computed_checksum == final_checksum, "final outbox checksum must verify")
+
+local resumed = {}
+local restart_plugin = newPlugin(settings({ annotation_sync_enabled = true }))
+restart_plugin.startAnnotationReconcile = function(self, queued)
+    self.annotation_sync_inflight = queued
+    table.insert(resumed, queued)
+    return true
+end
+restart_plugin:resumeAnnotationOutbox()
+assert(#resumed == 1, "KOReader restart must resume one coalesced source snapshot")
+assert(resumed[1].sequence == 1062, "restart must resume the newest durable sequence")
+assert(resumed[1].desired[1].finish == storage_snapshot.desired[1].finish,
+    "restart must resume the newest user intent")
 
 os.execute = original_execute
 

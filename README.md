@@ -194,9 +194,17 @@ snapshots for the same book.
 This firmware cannot reliably apply annotations through a detached background
 book handle. A call may appear to succeed without producing a visible native
 annotation or an Amazon upload. The plugin therefore writes the newest snapshot
-to a private pending queue and waits for the exact local Kindle book to open.
-A low-power listener then retries automatically. A cloud placeholder sharing
-the same ASIN is never used as a substitute for the local book.
+to a private, root-only outbox under `/var/local` before position translation
+or Java attachment. Each atomic replacement carries a monotonic per-book
+sequence and SHA-256. A translated pending request then waits for the exact
+local Kindle book to open, and a low-power listener retries automatically. A
+cloud placeholder sharing the same ASIN is never used as a substitute for the
+local book.
+
+After KOReader exit, framework restart, sleep, or reboot, the source outbox is
+reloaded and the newest snapshot resumes. Native success deletes the source
+snapshot only through an atomic sequence/checksum comparison, so an older
+in-flight request cannot erase a newer edit or deletion.
 
 ### Native and cloud delivery
 
@@ -225,13 +233,13 @@ location 1. Native highlight color is left unchanged.
 
 ### Privacy
 
-Highlight and note text is limited to KOReader's metadata, transient request or
-pending files, Kindle's native annotation store, and Amazon's normal annotation
-pipeline. Temporary and successfully delivered requests are removed.
+Highlight and note text is limited to KOReader's metadata, root-only source and
+pending files under `/var/local`, transient requests, Kindle's native annotation
+store, and Amazon's normal annotation pipeline. Temporary and successfully
+delivered requests are removed.
 Diagnostics and support summaries contain counts and state only, never
-annotation text. Kindle's `/mnt/us` storage is FUSE-backed and may not enforce
-requested POSIX mode bits, so anyone with device-storage or root access should
-be treated as able to read a snapshot while it is pending.
+annotation text. Text-free receipts and anonymized support summaries remain on
+USB-visible `/mnt/us`; annotation payloads do not.
 
 Annotations are delivered to Kindle/Amazon Notebook, not Goodreads. Goodreads
 integration covers shelves, reading progress, completion, and ratings. This

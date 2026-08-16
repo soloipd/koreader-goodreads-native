@@ -3,6 +3,29 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-08-16
+
+### Added
+
+- A crash-safe source annotation outbox under `/var/local` that is atomically
+  replaced before position translation or Java attachment.
+- Monotonic per-ASIN sequence numbers and SHA-256 verification for every
+  source snapshot.
+- Compare-and-delete acknowledgement: successful native reconciliation can
+  remove only the exact sequence/checksum it processed, never a newer edit.
+- Automatic outbox resumption after KOReader restart and manual recovery from
+  the existing receipt menu.
+- Deterministic tests for 1,000 rapid replacements, note edits/removals,
+  interrupted temporary files, corrupt snapshots, stale sequence state, and
+  acknowledgement races.
+
+### Changed
+
+- Translated inactive-book snapshots now persist under root-only
+  `/var/local` storage. Existing `/mnt/us` pending snapshots migrate on replay.
+- Annotation success now requires acknowledged deletion of the matching source
+  outbox snapshot in addition to native readback and upload-queue acceptance.
+
 ## [0.5.0] - 2026-08-16
 
 ### Added

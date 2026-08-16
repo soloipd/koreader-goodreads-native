@@ -39,7 +39,8 @@ chmod 0644 "$agent_jar" "$annotation_agent_jar" "$launcher_class"
 chmod 0755 "$project_root/goodreads.koplugin/bin/sync-progress" \
     "$project_root/goodreads.koplugin/bin/sync-annotations" \
     "$project_root/goodreads.koplugin/bin/watch-pending-annotations" \
-    "$project_root/goodreads.koplugin/bin/manage-sync-receipts"
+    "$project_root/goodreads.koplugin/bin/manage-sync-receipts" \
+    "$project_root/goodreads.koplugin/bin/acknowledge-annotation-outbox"
 
 printf 'Built %s\n' "$agent_jar"
 printf 'Built %s\n' "$annotation_agent_jar"

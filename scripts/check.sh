@@ -12,7 +12,9 @@ sh -n "$plugin_dir/bin/sync-rating"
 sh -n "$plugin_dir/bin/sync-annotations"
 sh -n "$plugin_dir/bin/watch-pending-annotations"
 sh -n "$plugin_dir/bin/manage-sync-receipts"
+sh -n "$plugin_dir/bin/acknowledge-annotation-outbox"
 test -x "$plugin_dir/bin/manage-sync-receipts"
+test -x "$plugin_dir/bin/acknowledge-annotation-outbox"
 cmp -s "$project_root/VERSION" "$plugin_dir/VERSION" \
     || { printf 'error: packaged plugin version does not match release version\n' >&2; exit 1; }
 grep -Fq 'write_receipt saved_locally' "$plugin_dir/bin/sync-annotations" \
@@ -25,6 +27,12 @@ grep -Fq "'cloud_observed=unavailable'" "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: upload acceptance may be mislabeled as cloud observation\n' >&2; exit 1; }
 grep -Fq '"$WATCHER" --once "$2"' "$plugin_dir/bin/manage-sync-receipts" \
     || { printf 'error: retry action does not request a one-shot replay\n' >&2; exit 1; }
+grep -Fq 'self:persistAnnotationOutbox(snapshot)' "$plugin_dir/main.lua" \
+    || { printf 'error: captured annotations are not persisted before translation\n' >&2; exit 1; }
+grep -Fq 'result.outbox_acknowledged == "true"' "$plugin_dir/main.lua" \
+    || { printf 'error: annotation success does not require outbox acknowledgement\n' >&2; exit 1; }
+grep -Fq 'failed_stage=outbox_superseded' "$plugin_dir/bin/sync-annotations" \
+    || { printf 'error: superseded outbox requests are not rejected\n' >&2; exit 1; }
 grep -Fq 'chown "$framework_uid:$framework_gid" "$payload"' "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: annotation payload is not transferred to the framework JVM user\n' >&2; exit 1; }
 grep -Fq 'KSDKAnnotationsEnqueueForSync' "$plugin_dir/bin/sync-annotations" \
@@ -67,6 +75,7 @@ if command -v shellcheck >/dev/null 2>&1; then
         "$plugin_dir/bin/sync-annotations" \
         "$plugin_dir/bin/watch-pending-annotations" \
         "$plugin_dir/bin/manage-sync-receipts" \
+        "$plugin_dir/bin/acknowledge-annotation-outbox" \
         "$project_root/scripts/build.sh" \
         "$project_root/scripts/check.sh" \
         "$project_root/scripts/package.sh"
@@ -86,11 +95,14 @@ case "$lua_checker" in
     luac5.1|luac)
         "$lua_checker" -p "$plugin_dir/main.lua"
         "$lua_checker" -p "$plugin_dir/_meta.lua"
+        "$lua_checker" -p "$plugin_dir/annotationoutbox.lua"
         ;;
     lua5.1|luajit)
         LUA_CHECK_FILE="$plugin_dir/main.lua" \
             "$lua_checker" -e 'assert(loadfile(os.getenv("LUA_CHECK_FILE")))'
         LUA_CHECK_FILE="$plugin_dir/_meta.lua" \
+            "$lua_checker" -e 'assert(loadfile(os.getenv("LUA_CHECK_FILE")))'
+        LUA_CHECK_FILE="$plugin_dir/annotationoutbox.lua" \
             "$lua_checker" -e 'assert(loadfile(os.getenv("LUA_CHECK_FILE")))'
         ;;
     '')
@@ -107,7 +119,14 @@ for candidate in lua5.1 luajit lua; do
 done
 
 if [ -n "$lua_runtime" ]; then
-    PROJECT_ROOT="$project_root" "$lua_runtime" "$project_root/tests/test_main.lua"
+    outbox_test_root="$(mktemp -d)"
+    trap 'rm -rf "$outbox_test_root"' EXIT HUP INT TERM
+    PROJECT_ROOT="$project_root" GOODREADS_PRIVATE_STATE_DIR="$outbox_test_root" \
+        GOODREADS_SHA256_TOOL="$(command -v sha256sum)" \
+        "$lua_runtime" "$project_root/tests/test_main.lua"
+    PROJECT_ROOT="$project_root" "$lua_runtime" "$project_root/tests/test_annotation_outbox.lua"
+    rm -rf "$outbox_test_root"
+    trap - EXIT HUP INT TERM
 else
     printf 'warning: no Lua runtime found; behavior tests were skipped\n' >&2
 fi

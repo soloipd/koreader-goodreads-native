@@ -91,6 +91,14 @@ KFX anchor, and emits the exact native short and long positions.
 
 Before translation, the plugin collapses exact and endpoint-reversed duplicate
 KOReader ranges and retains a non-empty note from either copy. The annotation
+snapshot is then atomically committed under `/var/local` before translation.
+Its deterministic source envelope has a monotonic per-ASIN sequence and SHA-256
+over normalized XPointer ranges and notes. The sequence high-water mark and a
+valid existing snapshot jointly prevent rollback after an interrupted write.
+On startup, one plugin instance verifies and resumes every surviving source
+snapshot.
+
+The annotation
 agent requires ReaderSDK's active book to match both the ASIN
 and explicit native KFX path, reconciles highlight and note objects through
 `AnnotationManager`, and notifies the KPP proxy. It
@@ -103,8 +111,8 @@ root process to the framework JVM's dynamically resolved UID/GID, then the versi
 immediately after loading, with bounded fallback cleanup by the helper; persistent plugin
 state contains coordinate keys only. Diagnostics expose only counts and
 sanitized success/failure stages. Requested POSIX modes are not a reliable
-privacy boundary on Kindle's FUSE-backed `/mnt/us`; physical-storage and root
-access are therefore in the same trust boundary while a snapshot is pending.
+privacy boundary on Kindle's FUSE-backed `/mnt/us`; source and translated
+pending annotation payloads therefore live on root-only `/var/local` instead.
 The agent closes and reopens the book before
 reporting local verification. Before the agent write, the shell enables both
 the legacy journal and KSDK shadow-mode lanes. After local, proxy, native
@@ -118,7 +126,11 @@ active, the request is not mutated or accepted: its latest snapshot moves to a
 root-only pending queue. One lock-protected watcher blocks on app manager
 `appStarted` events and replays pending books when native KPP becomes active.
 Transient native failures retry up to three times; a newer same-book snapshot
-cancels an older retry.
+cancels an older retry. After full native verification and queue acceptance,
+the helper atomically renames the source outbox entry and deletes it only if its
+sequence and checksum still match the completed request. If a newer source won
+the race, it is restored or left in place and the older operation cannot report
+outbox acknowledgement.
 
 Each shell reconciliation atomically replaces a text-free per-ASIN receipt in
 `goodreads_native_sync_receipts`. Receipt transitions distinguish

@@ -12,6 +12,7 @@ local _ = require("gettext")
 local logger = require("logger")
 local json = require("json")
 local util = require("util")
+local AnnotationOutbox = require("annotationoutbox")
 
 local LIPC_HASH_TOOL = "/usr/bin/lipc-hash-prop"
 local SQLITE_TOOL = "/usr/bin/sqlite3"
@@ -28,9 +29,14 @@ local KINDLE_HELPER_PATHS = {
     "/mnt/us/koreader/plugins/kindle.koplugin/bin/kindle-helper",
 }
 local ANNOTATION_STATE_DIR = "/mnt/us/koreader/settings/goodreads_native_annotations"
-local ANNOTATION_PENDING_DIR = "/mnt/us/koreader/settings/goodreads_native_annotations_pending"
 local SYNC_RECEIPT_DIR = "/mnt/us/koreader/settings/goodreads_native_sync_receipts"
 local SUPPORT_BUNDLE_FILE = "/mnt/us/koreader/settings/goodreads_native_support.txt"
+local PRIVATE_STATE_DIR = os.getenv("GOODREADS_PRIVATE_STATE_DIR")
+    or "/var/local/koreader-goodreads-native"
+local ANNOTATION_PENDING_DIR = PRIVATE_STATE_DIR .. "/annotation-pending"
+local ANNOTATION_OUTBOX_DIR = PRIVATE_STATE_DIR .. "/annotation-outbox"
+local ANNOTATION_SEQUENCE_DIR = PRIVATE_STATE_DIR .. "/annotation-sequences"
+local SHA256_TOOL = os.getenv("GOODREADS_SHA256_TOOL") or "/usr/bin/sha256sum"
 local RATING_HELPER = "/mnt/us/koreader/plugins/goodreads.koplugin/bin/sync-rating"
 local RATING_RESULT_PREFIX = "/tmp/goodreads-rating-result"
 local PROGRESS_RESULT_FILE = "/tmp/goodreads-progress-result.log"
@@ -82,6 +88,8 @@ local ANNOTATION_RESULT_KEYS = {
     legacy_cloud_deletes = true,
     book_source = true,
     sync_enqueued = true,
+    outbox_sequence = true,
+    outbox_acknowledged = true,
 }
 local SYNC_RECEIPT_KEYS = {
     version = true,
@@ -103,6 +111,8 @@ local SYNC_RECEIPT_KEYS = {
     upload_requested = true,
     sync_enqueued = true,
     cloud_observed = true,
+    outbox_sequence = true,
+    outbox_acknowledged = true,
 }
 local DEBUG_FIELD_ORDER = {
     "trigger",
@@ -147,6 +157,8 @@ local DEBUG_FIELD_ORDER = {
     "legacy_cloud_deletes",
     "book_source",
     "sync_enqueued",
+    "outbox_sequence",
+    "outbox_acknowledged",
     "interval_seconds",
     "attempt",
     "duplicates_collapsed",
@@ -160,6 +172,7 @@ local Goodreads = WidgetContainer:extend({
     name = "goodreads_native",
     is_doc_only = false,
 })
+local outbox_resume_scheduled = false
 
 local function isAsin(value)
     return type(value) == "string" and value:match("^B[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]$") ~= nil
@@ -433,6 +446,33 @@ local function readFirstLine(path)
     return value
 end
 
+local function readWholeFile(path, maximum)
+    local file = io.open(path, "rb")
+    if not file then
+        return nil
+    end
+    local content = file:read((maximum or 1024 * 1024) + 1)
+    file:close()
+    if not content or #content > (maximum or 1024 * 1024) then
+        return nil
+    end
+    return content
+end
+
+local function sha256File(path)
+    if type(path) ~= "string" or not path:match("^/[%w%._/%-]+$") then
+        return nil
+    end
+    local pipe = io.popen(util.shell_escape({ SHA256_TOOL, path }) .. " 2>/dev/null", "r")
+    if not pipe then
+        return nil
+    end
+    local line = pipe:read("*l")
+    pipe:close()
+    local digest = line and line:match("^([0-9a-f]+)")
+    return digest and #digest == 64 and digest or nil
+end
+
 local function formatReceiptTime(value)
     local timestamp = tonumber(value)
     if not timestamp or timestamp < 1 then
@@ -513,6 +553,125 @@ local function openPrivateFile(path)
         return nil
     end
     return io.open(path, "w")
+end
+
+local function readAnnotationOutbox(asin)
+    if not isAsin(asin) then
+        return nil, "invalid ASIN"
+    end
+    local content = readWholeFile(ANNOTATION_OUTBOX_DIR .. "/" .. asin, 1024 * 1024)
+    if not content then
+        return nil, "outbox missing"
+    end
+    local body, checksum, split_error = AnnotationOutbox.split(content)
+    if not body then
+        return nil, split_error
+    end
+    local verify_path = string.format("/tmp/goodreads-outbox-verify-%d%d", os.time(), math.random(1000, 9999))
+    local verify = openPrivateFile(verify_path)
+    if not verify then
+        return nil, "cannot create checksum input"
+    end
+    verify:write(body)
+    verify:close()
+    local actual = sha256File(verify_path)
+    os.remove(verify_path)
+    if actual ~= checksum then
+        return nil, "outbox checksum mismatch"
+    end
+    local snapshot, parse_error = AnnotationOutbox.parse(body, asin)
+    if not snapshot then
+        return nil, parse_error
+    end
+    snapshot.outbox_checksum = checksum
+    return snapshot
+end
+
+local function persistAnnotationOutbox(snapshot, fault_stage)
+    local mkdir_status = os.execute(
+        "umask 077; mkdir -p " .. util.shell_escape({ ANNOTATION_OUTBOX_DIR })
+            .. " " .. util.shell_escape({ ANNOTATION_SEQUENCE_DIR })
+            .. "; chmod 700 " .. util.shell_escape({ PRIVATE_STATE_DIR })
+            .. " " .. util.shell_escape({ ANNOTATION_OUTBOX_DIR })
+            .. " " .. util.shell_escape({ ANNOTATION_SEQUENCE_DIR })
+    )
+    if mkdir_status ~= 0 then
+        return false, "cannot create private outbox"
+    end
+    local sequence = tonumber(readFirstLine(ANNOTATION_SEQUENCE_DIR .. "/" .. snapshot.asin)) or 0
+    local existing = readAnnotationOutbox(snapshot.asin)
+    if existing and existing.sequence > sequence then
+        sequence = existing.sequence
+    end
+    sequence = sequence + 1
+    local body, encode_error = AnnotationOutbox.encode(snapshot, sequence, os.time())
+    if not body then
+        return false, encode_error
+    end
+    local temp_path = string.format("%s/%s.%d", ANNOTATION_OUTBOX_DIR, snapshot.asin, math.random(100000, 999999))
+    local temp = openPrivateFile(temp_path)
+    if not temp then
+        return false, "cannot create outbox temporary file"
+    end
+    temp:write(body)
+    temp:close()
+    if fault_stage == "after_body_write" then
+        return false, "injected interruption after body write"
+    end
+    local checksum = sha256File(temp_path)
+    local packed = checksum and AnnotationOutbox.pack(body, checksum) or nil
+    if not packed then
+        os.remove(temp_path)
+        return false, "cannot checksum annotation outbox"
+    end
+    if fault_stage == "after_checksum" then
+        return false, "injected interruption after checksum"
+    end
+    temp = io.open(temp_path, "wb")
+    if not temp then
+        os.remove(temp_path)
+        return false, "cannot finalize annotation outbox"
+    end
+    temp:write(packed)
+    temp:close()
+    if fault_stage == "after_envelope_write" then
+        return false, "injected interruption after envelope write"
+    end
+    os.execute("chmod 600 " .. util.shell_escape({ temp_path }))
+    local final_path = ANNOTATION_OUTBOX_DIR .. "/" .. snapshot.asin
+    if not os.rename(temp_path, final_path) then
+        os.remove(temp_path)
+        return false, "cannot commit annotation outbox"
+    end
+    if fault_stage == "after_outbox_commit" then
+        return false, "injected interruption after outbox commit"
+    end
+    local sequence_temp = string.format("%s/%s.%d", ANNOTATION_SEQUENCE_DIR, snapshot.asin, math.random(100000, 999999))
+    local sequence_file = openPrivateFile(sequence_temp)
+    if not sequence_file then
+        return false, "cannot persist annotation sequence"
+    end
+    sequence_file:write(tostring(sequence), "\n")
+    sequence_file:close()
+    if fault_stage == "after_sequence_write" then
+        return false, "injected interruption after sequence write"
+    end
+    os.execute("chmod 600 " .. util.shell_escape({ sequence_temp }))
+    if not os.rename(sequence_temp, ANNOTATION_SEQUENCE_DIR .. "/" .. snapshot.asin) then
+        os.remove(sequence_temp)
+        return false, "cannot commit annotation sequence"
+    end
+    if fault_stage == "after_sequence_commit" then
+        return false, "injected interruption after sequence commit"
+    end
+    snapshot.sequence = sequence
+    snapshot.token = sequence
+    snapshot.outbox_checksum = checksum
+    return true
+end
+
+function Goodreads:persistAnnotationOutbox(snapshot)
+    return persistAnnotationOutbox(snapshot, self.annotation_outbox_fault_stage)
 end
 
 local function getAnnotationBookPaths(reader)
@@ -628,7 +787,7 @@ function Goodreads:captureAnnotationSnapshot(reader, trigger)
 
     local token = (self.annotation_snapshot_tokens[asin] or 0) + 1
     self.annotation_snapshot_tokens[asin] = token
-    return {
+    local snapshot = {
         asin = asin,
         epub_path = epub_path,
         native_path = native_path,
@@ -637,6 +796,18 @@ function Goodreads:captureAnnotationSnapshot(reader, trigger)
         token = token,
         attempt = 0,
     }
+    local persisted, persist_error = self:persistAnnotationOutbox(snapshot)
+    if not persisted then
+        self:debugLog("annotations_sync_skipped", {
+            trigger = trigger,
+            asin = asin,
+            annotations = #desired,
+            status = "outbox_persist_failed",
+        })
+        return nil, persist_error
+    end
+    self.annotation_snapshot_tokens[asin] = snapshot.sequence
+    return snapshot
 end
 
 function Goodreads:enqueuePendingAnnotationSnapshot(snapshot)
@@ -793,6 +964,8 @@ function Goodreads:startAnnotationReconcile(snapshot)
     payload:write("version=1\n")
     payload:write("asin=", asin, "\n")
     payload:write("request_id=", request_id, "\n")
+    payload:write("outbox_sequence=", tostring(snapshot.sequence or 0), "\n")
+    payload:write("outbox_checksum=", tostring(snapshot.outbox_checksum or "legacy"), "\n")
     payload:write("retry_count=", tostring(snapshot.attempt or 0), "\n")
     payload:write("trigger=", tostring(trigger or "unknown"), "\n")
     payload:write("native_path_hex=", hexEncode(native_path), "\n")
@@ -830,6 +1003,43 @@ function Goodreads:startAnnotationReconcile(snapshot)
     self.annotation_request_ids[asin] = request_id
     self:pollAnnotationResult(snapshot)
     return true
+end
+
+function Goodreads:resumeAnnotationOutbox()
+    if not self.settings.annotation_sync_enabled then
+        return
+    end
+    local pipe = io.popen(
+        "find " .. util.shell_escape({ ANNOTATION_OUTBOX_DIR })
+            .. " -maxdepth 1 -type f -name 'B?????????' 2>/dev/null",
+        "r"
+    )
+    if not pipe then
+        return
+    end
+    local snapshots = {}
+    for path in pipe:lines() do
+        local asin = path:match("/([^/]+)$")
+        if isAsin(asin) and path == ANNOTATION_OUTBOX_DIR .. "/" .. asin then
+            local snapshot, detail = readAnnotationOutbox(asin)
+            if snapshot then
+                table.insert(snapshots, snapshot)
+            else
+                self:debugLog("annotations_outbox_resume_failed", {
+                    asin = asin,
+                    status = safeDebugValue(detail or "invalid_outbox"),
+                })
+            end
+        end
+    end
+    pipe:close()
+    table.sort(snapshots, function(left, right)
+        return left.sequence < right.sequence
+    end)
+    for _, snapshot in ipairs(snapshots) do
+        self.annotation_snapshot_tokens[snapshot.asin] = snapshot.sequence
+        self:queueAnnotationSnapshot(snapshot)
+    end
 end
 
 function Goodreads:drainPendingAnnotationSnapshots()
@@ -910,6 +1120,8 @@ function Goodreads:pollAnnotationResult(snapshot)
                 and (result.cloud_snapshot_synced == "true"
                     or result.cloud_snapshot_synced == "unavailable")
                 and result.sync_enqueued == "true"
+                and result.outbox_sequence == tostring(snapshot.sequence)
+                and result.outbox_acknowledged == "true"
             self:debugLog("annotations_sync_result", {
                 trigger = trigger,
                 asin = asin,
@@ -942,12 +1154,15 @@ function Goodreads:pollAnnotationResult(snapshot)
                 legacy_cloud_deletes = result.legacy_cloud_deletes,
                 book_source = result.book_source,
                 sync_enqueued = result.sync_enqueued,
+                outbox_sequence = result.outbox_sequence,
+                outbox_acknowledged = result.outbox_acknowledged,
             })
             self.last_annotation_sync_result = result
             self:finishAnnotationReconcile(
                 snapshot,
                 success,
                 not success and result.failed_stage ~= "validate_payload"
+                    and result.failed_stage ~= "outbox_superseded"
             )
             return
         end
@@ -1056,6 +1271,12 @@ function Goodreads:init()
     self.annotation_pending_order = {}
     self.ui.menu:registerToMainMenu(self)
     self:applyReaderHook()
+    if not outbox_resume_scheduled then
+        outbox_resume_scheduled = true
+        UIManager:scheduleIn(0, function()
+            self:resumeAnnotationOutbox()
+        end)
+    end
 end
 
 function Goodreads:saveSettings()
@@ -1851,7 +2072,10 @@ function Goodreads:showDiagnostics()
     local receipt = isAsin(asin)
         and readKeyValueFile(SYNC_RECEIPT_DIR .. "/" .. asin, SYNC_RECEIPT_KEYS)
         or nil
-    local pending = isAsin(asin) and isReadable(ANNOTATION_PENDING_DIR .. "/" .. asin)
+    local pending = isAsin(asin) and (
+        isReadable(ANNOTATION_PENDING_DIR .. "/" .. asin)
+            or isReadable(ANNOTATION_OUTBOX_DIR .. "/" .. asin)
+    )
 
     local lines = {
         _("Goodreads native sync diagnostics"),
@@ -1990,6 +2214,12 @@ function Goodreads:showDiagnostics()
             ["false"] = true,
             unavailable = true,
         }, "unavailable")
+        local outbox_acknowledged = receiptEnum(receipt.outbox_acknowledged, {
+            ["true"] = true,
+            ["false"] = true,
+            unavailable = true,
+        }, "unavailable")
+        local outbox_sequence = receiptCount(receipt.outbox_sequence)
         local retry_reason = receiptEnum(receipt.retry_reason, {
             none = true,
             wait_for_active_book = true,
@@ -2031,6 +2261,11 @@ function Goodreads:showDiagnostics()
             agent_generation
         ))
         table.insert(lines, string.format(
+            _("Outbox: sequence %s; acknowledged deletion %s"),
+            outbox_sequence,
+            outbox_acknowledged
+        ))
+        table.insert(lines, string.format(
             _("Cloud observation: %s"),
             receipt.cloud_observed == "true" and _("verified") or _("unavailable")
         ))
@@ -2059,16 +2294,31 @@ end
 
 function Goodreads:retryPendingAnnotations()
     local asin = self:getReceiptAsin()
-    if not asin or not isReadable(ANNOTATION_PENDING_DIR .. "/" .. asin) then
+    local has_outbox = asin and isReadable(ANNOTATION_OUTBOX_DIR .. "/" .. asin)
+    local has_pending = asin and isReadable(ANNOTATION_PENDING_DIR .. "/" .. asin)
+    if not asin or (not has_outbox and not has_pending) then
         UIManager:show(InfoMessage:new({
             text = _("No pending annotation snapshot exists for the selected book."),
             timeout = 4,
         }))
         return false
     end
-    os.execute(
-        util.shell_escape({ RECEIPT_HELPER, "retry", asin }) .. " >/dev/null 2>&1"
-    )
+    if has_outbox then
+        local snapshot, detail = readAnnotationOutbox(asin)
+        if not snapshot then
+            UIManager:show(InfoMessage:new({
+                text = string.format(_("Pending outbox is invalid: %s"), detail or _("unknown error")),
+                timeout = 5,
+            }))
+            return false
+        end
+        self.annotation_snapshot_tokens[asin] = snapshot.sequence
+        self:queueAnnotationSnapshot(snapshot)
+    else
+        os.execute(
+            util.shell_escape({ RECEIPT_HELPER, "retry", asin }) .. " >/dev/null 2>&1"
+        )
+    end
     UIManager:show(InfoMessage:new({
         text = _("Pending annotation retry requested."),
         timeout = 3,
@@ -2331,7 +2581,10 @@ function Goodreads:addToMainMenu(menu_items)
                         text = _("Retry pending annotations"),
                         enabled_func = function()
                             local asin = self:getReceiptAsin()
-                            return asin and isReadable(ANNOTATION_PENDING_DIR .. "/" .. asin)
+                            return asin and (
+                                isReadable(ANNOTATION_PENDING_DIR .. "/" .. asin)
+                                    or isReadable(ANNOTATION_OUTBOX_DIR .. "/" .. asin)
+                            )
                         end,
                         callback = function()
                             self:retryPendingAnnotations()
@@ -2341,7 +2594,10 @@ function Goodreads:addToMainMenu(menu_items)
                         text = _("Discard pending annotations…"),
                         enabled_func = function()
                             local asin = self:getReceiptAsin()
-                            return asin and isReadable(ANNOTATION_PENDING_DIR .. "/" .. asin)
+                            return asin and (
+                                isReadable(ANNOTATION_PENDING_DIR .. "/" .. asin)
+                                    or isReadable(ANNOTATION_OUTBOX_DIR .. "/" .. asin)
+                            )
                         end,
                         callback = function()
                             self:showDiscardPendingDialog()

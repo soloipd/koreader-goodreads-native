@@ -8,12 +8,36 @@ set -u
 PLUGIN_DIR="${GOODREADS_PLUGIN_DIR:-/mnt/us/koreader/plugins/goodreads.koplugin}"
 SYNC_HELPER="$PLUGIN_DIR/bin/sync-annotations"
 SETTINGS_DIR="${GOODREADS_SETTINGS_DIR:-/mnt/us/koreader/settings}"
-PENDING_DIR="$SETTINGS_DIR/goodreads_native_annotations_pending"
+PRIVATE_STATE_DIR="${GOODREADS_PRIVATE_STATE_DIR:-/var/local/koreader-goodreads-native}"
+PENDING_DIR="$PRIVATE_STATE_DIR/annotation-pending"
+LEGACY_PENDING_DIR="$SETTINGS_DIR/goodreads_native_annotations_pending"
 LOCK_ROOT="${GOODREADS_LOCK_DIR:-/tmp}"
 WATCH_LOCK="$LOCK_ROOT/goodreads-annotation-watcher.lock"
 LIPC_WAIT_EVENT="${GOODREADS_LIPC_WAIT_EVENT:-/usr/bin/lipc-wait-event}"
 BOOK_LOCK_ROOT="$LOCK_ROOT"
 TMP_ROOT="${GOODREADS_TMP_DIR:-/tmp}"
+
+migrate_legacy_pending() {
+    mkdir -p "$PENDING_DIR" || return 1
+    chmod 0700 "$PRIVATE_STATE_DIR" "$PENDING_DIR" 2>/dev/null || true
+    for legacy in "$LEGACY_PENDING_DIR"/B?????????; do
+        [ -f "$legacy" ] || continue
+        asin="$(basename "$legacy")"
+        if [ -e "$PENDING_DIR/$asin" ]; then
+            rm -f "$legacy"
+            continue
+        fi
+        temp="$PENDING_DIR/$asin.migrate.$$"
+        if cp "$legacy" "$temp" && chmod 0600 "$temp" \
+            && mv -f "$temp" "$PENDING_DIR/$asin"; then
+            rm -f "$legacy"
+        else
+            rm -f "$temp"
+        fi
+    done
+}
+
+migrate_legacy_pending || true
 
 once_asin=""
 if [ "$#" -eq 2 ] && [ "$1" = "--once" ] \

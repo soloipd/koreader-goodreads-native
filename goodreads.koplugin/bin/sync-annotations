@@ -11,8 +11,10 @@ PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
 AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v27.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
 STATE_DIR="/mnt/us/koreader/settings/goodreads_native_annotations"
-PENDING_DIR="/mnt/us/koreader/settings/goodreads_native_annotations_pending"
+PENDING_DIR="/var/local/koreader-goodreads-native/annotation-pending"
 RECEIPT_DIR="/mnt/us/koreader/settings/goodreads_native_sync_receipts"
+OUTBOX_DIR="/var/local/koreader-goodreads-native/annotation-outbox"
+OUTBOX_ACK_HELPER="$PLUGIN_DIR/bin/acknowledge-annotation-outbox"
 PENDING_WATCHER="$PLUGIN_DIR/bin/watch-pending-annotations"
 LOCK_DIR="/tmp/goodreads-annotation-sync.lock"
 PUBLISHED_RESULT="/tmp/goodreads-annotation-result.log"
@@ -25,6 +27,7 @@ KSDK_SHADOW_SYNC_PROPERTY="KPPACShadowModeManagerShouldSyncKSDKAnnotations"
 WHISPERSYNC_CONTROLLER="com.lab126.whispersync"
 WHISPERSYNC_START_PROPERTY="startSync"
 LIPC_SET_PROP="/usr/bin/lipc-set-prop"
+SHA256_TOOL="/usr/bin/sha256sum"
 lock_acquired=0
 state_temp=""
 request_result=""
@@ -33,6 +36,10 @@ desired_count=""
 note_count="0"
 retry_count="0"
 trigger="unknown"
+outbox_sequence="legacy"
+outbox_checksum="legacy"
+outbox_acknowledged="unavailable"
+outbox_verify=""
 
 if [ "$#" -ne 1 ]; then
     exit 2
@@ -56,6 +63,9 @@ cleanup() {
     fi
     if [ -n "$pending_candidate" ]; then
         rm -f "$pending_candidate"
+    fi
+    if [ -n "$outbox_verify" ]; then
+        rm -f "$outbox_verify"
     fi
     if [ "$lock_acquired" -eq 1 ]; then
         rmdir "$LOCK_DIR" 2>/dev/null || true
@@ -81,6 +91,10 @@ request_result="/tmp/goodreads-annotation-result-$request_id.log"
 desired_count="$(sed -n 's/^desired_count=//p' "$payload" | sed -n '1p')"
 retry_count="$(sed -n 's/^retry_count=//p' "$payload" | sed -n '1p')"
 trigger="$(sed -n 's/^trigger=//p' "$payload" | sed -n '1p')"
+outbox_sequence="$(sed -n 's/^outbox_sequence=//p' "$payload" | sed -n '1p')"
+outbox_checksum="$(sed -n 's/^outbox_checksum=//p' "$payload" | sed -n '1p')"
+[ -n "$outbox_sequence" ] || outbox_sequence=legacy
+[ -n "$outbox_checksum" ] || outbox_checksum=legacy
 case "$desired_count" in
     ''|*[!0-9]*) exit 2 ;;
 esac
@@ -90,6 +104,13 @@ esac
 case "$trigger" in
     ''|*[!a-z0-9_]*) trigger=unknown ;;
 esac
+if [ "$outbox_sequence" = "legacy" ] && [ "$outbox_checksum" = "legacy" ]; then
+    :
+else
+    case "$outbox_sequence" in ''|*[!0-9]*) exit 2 ;; esac
+    case "$outbox_checksum" in ''|*[!0-9a-f]*) exit 2 ;; esac
+    [ ${#outbox_checksum} -eq 64 ] || exit 2
+fi
 note_count="$(awk -F= '/^desired\.[0-9]+\.note_hex=./ { count++ } END { print count + 0 }' "$payload")"
 
 receipt_value() {
@@ -165,6 +186,8 @@ write_receipt() {
         "journal_lane=$journal_lane" \
         "upload_requested=$upload_requested" \
         "sync_enqueued=$sync_enqueued" \
+        "outbox_sequence=$outbox_sequence" \
+        "outbox_acknowledged=$outbox_acknowledged" \
         'cloud_observed=unavailable' >"$receipt_temp"; then
         rm -f "$receipt_temp"
         return 1
@@ -172,6 +195,38 @@ write_receipt() {
     chmod 0600 "$receipt_temp"
     mv -f "$receipt_temp" "$RECEIPT_DIR/$asin"
 }
+
+publish_result() {
+    published_temp="$PUBLISHED_RESULT.$$"
+    if ! cp "$request_result" "$published_temp" || ! mv -f "$published_temp" "$PUBLISHED_RESULT"; then
+        rm -f "$published_temp"
+        return 1
+    fi
+}
+
+outbox_matches=true
+if [ "$outbox_sequence" != "legacy" ]; then
+    outbox_verify="/tmp/goodreads-outbox-verify-$$"
+    if [ ! -r "$OUTBOX_DIR/$asin" ] \
+        || ! grep -Fqx "sequence=$outbox_sequence" "$OUTBOX_DIR/$asin" \
+        || ! grep -Fqx "checksum=$outbox_checksum" "$OUTBOX_DIR/$asin" \
+        || ! sed '$d' "$OUTBOX_DIR/$asin" >"$outbox_verify" \
+        || [ "$("$SHA256_TOOL" "$outbox_verify" 2>/dev/null | awk '{ print $1 }')" \
+            != "$outbox_checksum" ]; then
+        outbox_matches=false
+    fi
+    rm -f "$outbox_verify"
+    outbox_verify=""
+fi
+if [ "$outbox_matches" != "true" ]; then
+    printf '%s\n' \
+        "asin=$asin" "request_id=$request_id" "outbox_sequence=$outbox_sequence" \
+        'outbox_acknowledged=false' 'success=false' 'failed_stage=outbox_superseded' \
+        >"$request_result"
+    publish_result || true
+    write_receipt failed "$request_result" outbox_superseded || true
+    exit 76
+fi
 
 if ! mkdir -p "$STATE_DIR"; then
     exit 4
@@ -327,9 +382,7 @@ if grep -Fqx 'success=true' "$request_result" \
     fi
 fi
 
-published_temp="$PUBLISHED_RESULT.$$"
-if ! cp "$request_result" "$published_temp" || ! mv -f "$published_temp" "$PUBLISHED_RESULT"; then
-    rm -f "$published_temp"
+if ! publish_result; then
     exit 8
 fi
 
@@ -363,6 +416,33 @@ if ! mv -f "$state_temp" "$state_file"; then
     exit 8
 fi
 state_temp=""
+
+if [ "$outbox_sequence" = "legacy" ]; then
+    outbox_acknowledged="unavailable"
+else
+    if [ -x "$OUTBOX_ACK_HELPER" ] \
+        && "$OUTBOX_ACK_HELPER" "$asin" "$outbox_sequence" "$outbox_checksum" \
+            >/dev/null 2>&1; then
+        outbox_acknowledged="true"
+    else
+        outbox_acknowledged="false"
+    fi
+fi
+
+if [ "$outbox_acknowledged" = "false" ]; then
+    normalized_result="$request_result.outbox"
+    grep -v -E '^(success|failed_stage|outbox_sequence|outbox_acknowledged)=' \
+        "$request_result" >"$normalized_result" || exit 8
+    printf '%s\n' "outbox_sequence=$outbox_sequence" 'outbox_acknowledged=false' \
+        'success=false' 'failed_stage=outbox_superseded' >>"$normalized_result"
+    mv -f "$normalized_result" "$request_result" || exit 8
+    publish_result || exit 8
+    write_receipt failed "$request_result" outbox_superseded || true
+    exit 11
+fi
+printf '%s\n' "outbox_sequence=$outbox_sequence" \
+    "outbox_acknowledged=$outbox_acknowledged" >>"$request_result"
+publish_result || exit 8
 if ! write_receipt queued_amazon "$request_result"; then
     exit 8
 fi
