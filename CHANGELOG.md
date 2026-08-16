@@ -3,6 +3,35 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-08-16
+
+### Fixed
+
+- KFX short PIDs are now preserved alongside long positions. Reconstructing a
+  position from its long form alone could produce an end PID of zero, turning a
+  short selection into an apparent highlight from the beginning of the book.
+- Annotation writes now select the cloud path that the running firmware has
+  actually enabled. On legacy-journal firmware they create native
+  `JournalingService` entries and request `WhisperSyncV1`; on KSDK firmware
+  they use the KSDK annotation proxy. The disabled WhisperStore bridge is no
+  longer treated as evidence that an upload was accepted.
+- Annotation reconciliation now requires the exact active local KFX path;
+  same-ASIN cloud placeholders and detached handles are never mutated or
+  reported as synced. Inactive snapshots coalesce in a root-only pending queue
+  and a single LIPC watcher replays them automatically when Kindle starts the
+  native reader for that book.
+- Existing malformed zero-endpoint records are removed locally and from
+  WhisperStore once, then the corrected highlights and notes are replayed.
+- Color-highlight metadata is normalized only for the cloud call, working
+  around firmware that casts Kindle's color map directly to a string while
+  leaving the native highlight and its color unchanged.
+- Success now requires local close/reopen readback, native notification, a
+  firmware-supported native journal write, an upload request, and acceptance
+  by the system annotation/WhisperSync queues. Each stage is reported
+  separately in redacted diagnostics.
+- Terminal KFX endpoints are normalized through Kindle's native position
+  factory. This prevents persisted highlights from expanding to location 1.
+
 ## [0.3.2] - 2026-08-16
 
 ### Changed

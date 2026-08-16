@@ -1,25 +1,33 @@
 #!/bin/sh
 
 # Reconcile one book's KOReader annotations with the native Kindle sidecar.
-# The attached V2 agent removes the private payload after opening it. This
+# The attached versioned agent removes the private payload after opening it. This
 # helper only performs bounded fallback cleanup after the agent/result window.
 
 set -u
 
 JAVA_BIN="/usr/java/bin/java"
 PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
-AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v4.jar"
+AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v26.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
 STATE_DIR="/mnt/us/koreader/settings/goodreads_native_annotations"
+PENDING_DIR="/mnt/us/koreader/settings/goodreads_native_annotations_pending"
+PENDING_WATCHER="$PLUGIN_DIR/bin/watch-pending-annotations"
 LOCK_DIR="/tmp/goodreads-annotation-sync.lock"
 PUBLISHED_RESULT="/tmp/goodreads-annotation-result.log"
 ATTACH_LOG="/tmp/goodreads-annotation-attach.log"
 ANNOTATION_CONTROLLER="com.lab126.KPPAnnotationController"
 ANNOTATION_ENQUEUE_PROPERTY="KSDKAnnotationsEnqueueForSync"
+SHADOW_SYNC_CONTROLLER="com.lab126.CVMShadowModeManager"
+LEGACY_SYNC_PROPERTY="KPPACShadowModeManagerShouldSyncLegacySidecarAndJournal"
+KSDK_SHADOW_SYNC_PROPERTY="KPPACShadowModeManagerShouldSyncKSDKAnnotations"
+WHISPERSYNC_CONTROLLER="com.lab126.whispersync"
+WHISPERSYNC_START_PROPERTY="startSync"
 LIPC_SET_PROP="/usr/bin/lipc-set-prop"
 lock_acquired=0
 state_temp=""
 request_result=""
+pending_candidate=""
 
 if [ "$#" -ne 1 ]; then
     exit 2
@@ -40,6 +48,9 @@ cleanup() {
     fi
     if [ -n "$state_temp" ]; then
         rm -f "$state_temp"
+    fi
+    if [ -n "$pending_candidate" ]; then
+        rm -f "$pending_candidate"
     fi
     if [ "$lock_acquired" -eq 1 ]; then
         rmdir "$LOCK_DIR" 2>/dev/null || true
@@ -85,7 +96,24 @@ esac
 
 state_file="$STATE_DIR/$asin"
 state_temp="$state_file.$$"
+if ! grep -Fqx 'agent_generation=26' "$state_file" 2>/dev/null; then
+    if ! printf '%s\n' 'force_cloud_replay=true' >>"$payload"; then
+        exit 8
+    fi
+    # The generation-18 migration already purged malformed zero-endpoint
+    # identities. Do not reconstruct those synthetic records again merely
+    # because a newer agent needs to replay valid records into an exact book
+    # identity. Fresh/older installs still receive the one-time cleanup.
+    if ! grep -Eq '^agent_generation=(18|19|20|21|22|23|24|25|26)$' "$state_file" 2>/dev/null; then
+        if ! printf '%s\n' \
+            'repair_zero_endpoint=true' \
+            'purge_legacy_cloud=true' >>"$payload"; then
+            exit 8
+        fi
+    fi
+fi
 if ! awk -F= '
+    BEGIN { print "agent_generation=26" }
     /^desired\.[0-9]+\.start=/ {
         key=$1; sub(/\.start$/, "", key); start[key]=$2
     }
@@ -105,11 +133,29 @@ if ! awk -F= '
 fi
 chmod 0600 "$state_temp"
 
+# The attached agent consumes and removes its request. Retain a root-only
+# candidate so an inactive native book can be replayed on the next KPP start.
+pending_candidate="/tmp/goodreads-annotation-pending-$$"
+if ! cp "$payload" "$pending_candidate" || ! chmod 0600 "$pending_candidate"; then
+    exit 8
+fi
+
 # KOReader and this helper run as root, but Amazon's framework JVM runs under a
 # firmware-specific account. Resolve its numeric identity from /proc instead of
 # assuming passwd/group names. Java reports EACCES here as FileNotFoundException,
 # which otherwise looks like an attach timing failure.
 if ! chown "$framework_uid:$framework_gid" "$payload" || ! chmod 0600 "$payload"; then
+    exit 9
+fi
+
+# ShadowModeManager consults these session flags while the native book is
+# being written and closed. Setting them after agentmain returns is too late:
+# WhisperStore accepts the journal edit, but KPP does not schedule its upload.
+if [ ! -x "$LIPC_SET_PROP" ] \
+    || ! "$LIPC_SET_PROP" "$SHADOW_SYNC_CONTROLLER" "$LEGACY_SYNC_PROPERTY" 1 \
+        >/dev/null 2>&1 \
+    || ! "$LIPC_SET_PROP" "$SHADOW_SYNC_CONTROLLER" "$KSDK_SHADOW_SYNC_PROPERTY" 1 \
+        >/dev/null 2>&1; then
     exit 9
 fi
 
@@ -143,16 +189,23 @@ fi
 
 enqueue_ok=0
 if grep -Fqx 'success=true' "$request_result" \
-    && grep -Fqx 'local_verified=true' "$request_result"; then
-    # ReaderSDK mutations update the native annotation store. Explicitly hand
-    # that store to Amazon's annotation sync client as the native reader does;
-    # otherwise a direct agent mutation may remain local indefinitely.
+    && grep -Fqx 'local_verified=true' "$request_result" \
+    && grep -Fqx 'native_notified=true' "$request_result" \
+    && grep -Eq '^ksdk_synced=(true|unavailable)$' "$request_result" \
+    && grep -Eq '^legacy_journaled=(true|unavailable)$' "$request_result" \
+    && grep -Fqx 'native_cloud_queued=true' "$request_result" \
+    && grep -Eq '^cloud_snapshot_synced=(true|unavailable)$' "$request_result"; then
+    # The agent has written the native KSDK or legacy journal and requested its
+    # firmware upload path. Also wake the system annotation and WhisperSync
+    # controllers so queued work is not delayed until a later reader close.
     normalized_result="$request_result.normalized"
     if ! grep -v '^success=' "$request_result" >"$normalized_result"; then
         exit 8
     fi
     if [ -x "$LIPC_SET_PROP" ] \
         && "$LIPC_SET_PROP" "$ANNOTATION_CONTROLLER" "$ANNOTATION_ENQUEUE_PROPERTY" koreader \
+            >/dev/null 2>&1 \
+        && "$LIPC_SET_PROP" "$WHISPERSYNC_CONTROLLER" "$WHISPERSYNC_START_PROPERTY" koreader \
             >/dev/null 2>&1; then
         printf '%s\n' 'local_success=true' 'sync_enqueued=true' 'success=true' \
             >>"$normalized_result"
@@ -174,6 +227,21 @@ if ! cp "$request_result" "$published_temp" || ! mv -f "$published_temp" "$PUBLI
 fi
 
 if ! grep -Fqx 'success=true' "$request_result"; then
+    if grep -Fqx 'failed_stage=wait_for_active_book' "$request_result"; then
+        pending_temp="$PENDING_DIR/$asin.$$"
+        if ! mkdir -p "$PENDING_DIR" \
+            || ! mv -f "$pending_candidate" "$pending_temp" \
+            || ! mv -f "$pending_temp" "$PENDING_DIR/$asin"; then
+            rm -f "$pending_temp"
+            exit 8
+        fi
+        pending_candidate=""
+        chmod 0600 "$PENDING_DIR/$asin"
+        printf '%s\n' 'pending_sync=true' >>"$PUBLISHED_RESULT"
+        if [ -x "$PENDING_WATCHER" ]; then
+            "$PENDING_WATCHER" </dev/null >/dev/null 2>&1 &
+        fi
+    fi
     exit 7
 fi
 if [ "$enqueue_ok" -ne 1 ]; then

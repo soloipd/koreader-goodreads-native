@@ -89,20 +89,31 @@ EID and unambiguous base PID as `data-kfx-*` attributes. A batched helper walks
 KOReader's normalized EPUB XPointer, counts Unicode characters from the nearest
 KFX anchor, and emits the exact native short and long positions.
 
-The annotation agent opens the explicit native KFX book, reconciles highlight
-and note objects through `AnnotationManager`, and closes the book. A transient
+The annotation agent requires ReaderSDK's active book to match both the ASIN
+and explicit native KFX path, reconciles highlight and note objects through
+`AnnotationManager`, and notifies the KPP proxy. It
+then reads the firmware's runtime feature flags. KSDK-enabled releases use the
+KSDK annotation proxy; legacy releases create native `JournalingService`
+entries for the exact active book and ask `WhisperSyncV1` to upload
+them. The optional WhisperStore snapshot bridge is used only when enabled. A transient
 mode-0600 payload carries note text. Ownership is transferred from KOReader's
-root process to the framework JVM's dynamically resolved UID/GID, then the V2 agent removes it
+root process to the framework JVM's dynamically resolved UID/GID, then the versioned agent removes it
 immediately after loading, with bounded fallback cleanup by the helper; persistent plugin
 state contains coordinate keys only. Diagnostics expose only counts and
-sanitized success/failure stages. After local reconciliation, the shell
-explicitly invokes `KSDKAnnotationsEnqueueForSync`; a failed enqueue is treated
-as retryable and is not reported as end-to-end success. Only one native annotation request runs at a
+sanitized success/failure stages. The agent closes and reopens the book before
+reporting local verification. Before the agent write, the shell enables both
+the legacy journal and KSDK shadow-mode lanes. After local, proxy, native
+journal, and upload-request stages succeed, it invokes
+`KSDKAnnotationsEnqueueForSync` and starts `com.lab126.whispersync`; a failed
+trigger is retryable and is not reported as end-to-end success. Unsupported
+paths are reported as `unavailable`, not successful. Only one native annotation request runs at a
 time. Rapid edits for the same ASIN coalesce to the newest immutable snapshot,
-while snapshots for other books remain queued. Transient native failures retry
-up to three times; a newer same-book snapshot cancels an older retry. Because
-snapshots capture paths, coordinates, and notes before close, retrying does not
-depend on ReaderUI still having the document open.
+while snapshots for other books remain queued. If the exact native book is not
+active, the request is not mutated or accepted: its latest snapshot moves to a
+root-only pending queue. One lock-protected watcher blocks on app manager
+`appStarted` events and replays pending books when native KPP becomes active.
+Transient native failures retry up to three times; a newer same-book snapshot
+cancels an older retry.
 
 ## Upgrade behavior
 
