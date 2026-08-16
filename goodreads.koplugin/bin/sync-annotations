@@ -8,7 +8,7 @@ set -u
 
 JAVA_BIN="/usr/java/bin/java"
 PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
-AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v3.jar"
+AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v4.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
 STATE_DIR="/mnt/us/koreader/settings/goodreads_native_annotations"
 LOCK_DIR="/tmp/goodreads-annotation-sync.lock"
@@ -142,7 +142,8 @@ if ! grep -Fqx "asin=$asin" "$request_result" \
 fi
 
 enqueue_ok=0
-if grep -Fqx 'success=true' "$request_result"; then
+if grep -Fqx 'success=true' "$request_result" \
+    && grep -Fqx 'local_verified=true' "$request_result"; then
     # ReaderSDK mutations update the native annotation store. Explicitly hand
     # that store to Amazon's annotation sync client as the native reader does;
     # otherwise a direct agent mutation may remain local indefinitely.

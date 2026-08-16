@@ -39,17 +39,29 @@ public final class Fakes {
             return new ArrayList<Object>(annotations);
         }
 
-        public boolean f(Object annotation, Book ignored) {
+        public boolean c(Object annotation, Book ignored) {
             annotations.add(annotation);
             return true;
         }
 
-        public boolean h(Object annotation, Book ignored) {
+        public boolean e(Object annotation, Book ignored) {
             return annotations.contains(annotation);
         }
 
-        public boolean g(Object annotation, Book ignored) {
+        public boolean d(Object annotation, Book ignored) {
             return annotations.remove(annotation);
+        }
+
+        public boolean f(Object annotation, Book ignored) {
+            throw new AssertionError("low-level create must not be used");
+        }
+
+        public boolean h(Object annotation, Book ignored) {
+            throw new AssertionError("low-level update must not be used");
+        }
+
+        public boolean g(Object annotation, Book ignored) {
+            throw new AssertionError("low-level delete must not be used");
         }
     }
 

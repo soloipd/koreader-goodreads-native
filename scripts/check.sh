@@ -5,7 +5,7 @@ set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 plugin_dir="$project_root/goodreads.koplugin"
 agent_jar="$plugin_dir/bin/goodreads-progress-agent-v2.jar"
-annotation_agent_jar="$plugin_dir/bin/goodreads-annotation-agent-v3.jar"
+annotation_agent_jar="$plugin_dir/bin/goodreads-annotation-agent-v4.jar"
 
 sh -n "$plugin_dir/bin/sync-progress"
 sh -n "$plugin_dir/bin/sync-rating"
@@ -14,6 +14,8 @@ grep -Fq 'chown "$framework_uid:$framework_gid" "$payload"' "$plugin_dir/bin/syn
     || { printf 'error: annotation payload is not transferred to the framework JVM user\n' >&2; exit 1; }
 grep -Fq 'KSDKAnnotationsEnqueueForSync' "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: native annotation sync is not explicitly enqueued\n' >&2; exit 1; }
+grep -Fq "grep -Fqx 'local_verified=true'" "$plugin_dir/bin/sync-annotations" \
+    || { printf 'error: unverified native annotations may be queued\n' >&2; exit 1; }
 grep -Fq "'local_success=true' 'sync_enqueued=false' 'success=false'" \
     "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: enqueue failure is not reflected in overall success\n' >&2; exit 1; }
@@ -83,9 +85,9 @@ grep -Fqx 'GoodreadsProgressAgentV2.class' <<<"$progress_entries" \
     || { printf 'error: agent JAR lacks its main class\n' >&2; exit 1; }
 grep -Fqx 'GoodreadsProgressAgentV2$RequestArguments.class' <<<"$progress_entries" \
     || { printf 'error: agent JAR lacks its argument parser class\n' >&2; exit 1; }
-grep -Fqx 'Agent-Class: GoodreadsAnnotationAgentV3' <<<"$annotation_manifest" \
+grep -Fqx 'Agent-Class: GoodreadsAnnotationAgentV4' <<<"$annotation_manifest" \
     || { printf 'error: annotation agent manifest is invalid\n' >&2; exit 1; }
-grep -Fqx 'GoodreadsAnnotationAgentV3.class' <<<"$annotation_entries" \
+grep -Fqx 'GoodreadsAnnotationAgentV4.class' <<<"$annotation_entries" \
     || { printf 'error: annotation agent JAR lacks its main class\n' >&2; exit 1; }
 
 javac_bin="${JAVAC:-javac}"
@@ -101,8 +103,9 @@ if command -v "$javac_bin" >/dev/null 2>&1 && command -v "$java_bin" >/dev/null 
     mkdir -p "$annotation_test_dir"
     "$javac_bin" --release 8 -Xlint:-options -d "$annotation_test_dir" \
         "$project_root/agent/src/GoodreadsAnnotationAgentV3.java" \
+        "$project_root/agent/src/GoodreadsAnnotationAgentV4.java" \
         "${annotation_test_sources[@]}"
-    "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationAgentV3Test
+    "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationAgentV4Test
 else
     printf 'warning: Java toolchain unavailable; annotation agent behavior tests were skipped\n' >&2
 fi
