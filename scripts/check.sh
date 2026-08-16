@@ -14,6 +14,7 @@ sh -n "$plugin_dir/bin/watch-pending-annotations"
 bash -n "$project_root/experiments/background-annotation-sync/build.sh"
 bash -n "$project_root/experiments/background-annotation-sync/run-readonly-probe.sh"
 bash -n "$project_root/experiments/background-annotation-sync/run-canary.sh"
+bash -n "$project_root/experiments/background-annotation-sync/run-observer.sh"
 grep -Fq 'chown "$framework_uid:$framework_gid" "$payload"' "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: annotation payload is not transferred to the framework JVM user\n' >&2; exit 1; }
 grep -Fq 'KSDKAnnotationsEnqueueForSync' "$plugin_dir/bin/sync-annotations" \
@@ -60,7 +61,8 @@ if command -v shellcheck >/dev/null 2>&1; then
         "$project_root/scripts/package.sh" \
         "$project_root/experiments/background-annotation-sync/build.sh" \
         "$project_root/experiments/background-annotation-sync/run-readonly-probe.sh" \
-        "$project_root/experiments/background-annotation-sync/run-canary.sh"
+        "$project_root/experiments/background-annotation-sync/run-canary.sh" \
+        "$project_root/experiments/background-annotation-sync/run-observer.sh"
 fi
 
 lua_checker=""
@@ -145,9 +147,12 @@ if command -v "$javac_bin" >/dev/null 2>&1 && command -v "$java_bin" >/dev/null 
         "$project_root/agent/src/GoodreadsAnnotationAgentV27.java" \
         "$project_root/experiments/background-annotation-sync/BackgroundAnnotationCanaryAgentV1.java" \
         "$project_root/experiments/background-annotation-sync/BackgroundAnnotationCanaryAgentV1Test.java" \
+        "$project_root/experiments/background-annotation-sync/BackgroundAnnotationObserverAgentV1.java" \
+        "$project_root/experiments/background-annotation-sync/BackgroundAnnotationObserverAgentV1Test.java" \
         "${annotation_test_sources[@]}"
     "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationAgentV27Test
     "$java_bin" -cp "$annotation_test_dir" BackgroundAnnotationCanaryAgentV1Test
+    "$java_bin" -cp "$annotation_test_dir" BackgroundAnnotationObserverAgentV1Test
 else
     printf 'warning: Java toolchain unavailable; annotation agent behavior tests were skipped\n' >&2
 fi
