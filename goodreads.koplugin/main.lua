@@ -861,104 +861,58 @@ function Goodreads:queueAnnotationSnapshot(snapshot)
     return self:startAnnotationReconcile(snapshot)
 end
 
-function Goodreads:startAnnotationReconcile(snapshot)
+local function validateTranslatedPositions(result, desired_count)
+    if not result or not result.ok or type(result.positions) ~= "table"
+        or #result.positions ~= desired_count
+    then
+        return nil, "position translation failed"
+    end
+    for _, position in ipairs(result.positions) do
+        local start_long = position and position.start and position.start.long
+        local start_short = position and position.start and position.start.pid
+        local end_long = position and position["end"] and position["end"].long
+        local end_short = position and position["end"] and position["end"].pid
+        if type(start_long) ~= "string" or #start_long ~= 12
+            or not start_long:match("^A[%w%+/]+$")
+            or type(start_short) ~= "number" or start_short < 0
+            or start_short > 2147483647 or start_short ~= math.floor(start_short)
+            or type(end_long) ~= "string" or #end_long ~= 12
+            or not end_long:match("^A[%w%+/]+$")
+            or type(end_short) ~= "number" or end_short < 0
+            or end_short > 2147483647 or end_short ~= math.floor(end_short)
+        then
+            return nil, "position translation returned invalid coordinates"
+        end
+    end
+    return result.positions
+end
+
+function Goodreads:cleanupAnnotationTranslation(snapshot)
+    for _, key in ipairs({
+        "translation_request_path",
+        "translation_result_path",
+        "translation_temporary_path",
+        "translation_failure_path",
+    }) do
+        local path = snapshot[key]
+        if path then
+            os.remove(path)
+            snapshot[key] = nil
+        end
+    end
+end
+
+function Goodreads:startTranslatedAnnotationReconcile(snapshot, translated)
     local asin = snapshot.asin
-    local epub_path = snapshot.epub_path
     local native_path = snapshot.native_path
     local desired = snapshot.desired
     local trigger = snapshot.trigger
-
-    local translated = {}
-    if #desired > 0 then
-        local kindle_helper
-        for _, candidate in ipairs(KINDLE_HELPER_PATHS) do
-            if isReadable(candidate) then
-                kindle_helper = candidate
-                break
-            end
-        end
-        if not kindle_helper then
-            self:debugLog("annotations_sync_skipped", {
-                trigger = trigger,
-                asin = asin,
-                status = "position_helper_unavailable",
-            })
-            return false, "position helper unavailable"
-        end
-
-        local request_path = string.format(
-            "/tmp/goodreads-position-request-%d%d.json",
-            os.time(),
-            math.random(1000, 9999)
-        )
-        local request_items = {}
-        for _, item in ipairs(desired) do
-            table.insert(request_items, { start = item.start, ["end"] = item.finish })
-        end
-        local request_file = openPrivateFile(request_path)
-        if not request_file then
-            return false, "cannot create position request"
-        end
-        request_file:write(json.encode(request_items))
-        request_file:close()
-        os.execute("chmod 600 " .. util.shell_escape({ request_path }))
-
-        local command = util.shell_escape({
-            kindle_helper,
-            "translate-positions",
-            "--epub",
-            epub_path,
-            "--request",
-            request_path,
-        }) .. " 2>/dev/null"
-        local pipe = io.popen(command, "r")
-        local output = pipe and pipe:read("*a") or ""
-        if pipe then
-            pipe:close()
-        end
-        os.remove(request_path)
-        local ok_json, result = pcall(json.decode, output)
-        if not ok_json or not result or not result.ok or type(result.positions) ~= "table"
-            or #result.positions ~= #desired
-        then
-            self:debugLog("annotations_sync_skipped", {
-                trigger = trigger,
-                asin = asin,
-                annotations = #desired,
-                status = "position_translation_failed",
-            })
-            return false, "position translation failed"
-        end
-        for _, position in ipairs(result.positions) do
-            local start_long = position and position.start and position.start.long
-            local start_short = position and position.start and position.start.pid
-            local end_long = position and position["end"] and position["end"].long
-            local end_short = position and position["end"] and position["end"].pid
-            if type(start_long) ~= "string" or #start_long ~= 12
-                or not start_long:match("^A[%w%+/]+$")
-                or type(start_short) ~= "number" or start_short < 0
-                or start_short > 2147483647 or start_short ~= math.floor(start_short)
-                or type(end_long) ~= "string" or #end_long ~= 12
-                or not end_long:match("^A[%w%+/]+$")
-                or type(end_short) ~= "number" or end_short < 0
-                or end_short > 2147483647 or end_short ~= math.floor(end_short)
-            then
-                self:debugLog("annotations_sync_skipped", {
-                    trigger = trigger,
-                    asin = asin,
-                    annotations = #desired,
-                    status = "position_translation_invalid",
-                })
-                return false, "position translation returned invalid coordinates"
-            end
-        end
-        translated = result.positions
-    end
 
     local request_id = string.format("%d%d", os.time(), math.random(1000, 9999))
     local payload_path = "/tmp/goodreads-annotations-" .. request_id .. ".properties"
     local payload = openPrivateFile(payload_path)
     if not payload then
+        self:finishAnnotationReconcile(snapshot, false, true)
         return false, "cannot create annotation payload"
     end
     payload:write("version=1\n")
@@ -986,10 +940,15 @@ function Goodreads:startAnnotationReconcile(snapshot)
     end
     payload:close()
     os.execute("chmod 600 " .. util.shell_escape({ payload_path }))
-    os.execute(
+    local helper_status = os.execute(
         "(" .. util.shell_escape({ ANNOTATION_HELPER, payload_path })
             .. ") >/dev/null 2>&1 &"
     )
+    if helper_status ~= 0 then
+        os.remove(payload_path)
+        self:finishAnnotationReconcile(snapshot, false, true)
+        return false, "cannot start annotation helper"
+    end
     self:debugLog("annotations_sync_queued", {
         trigger = trigger,
         asin = asin,
@@ -1002,6 +961,148 @@ function Goodreads:startAnnotationReconcile(snapshot)
     self.annotation_sync_inflight = snapshot
     self.annotation_request_ids[asin] = request_id
     self:pollAnnotationResult(snapshot)
+    return true
+end
+
+function Goodreads:pollAnnotationTranslation(snapshot)
+    local asin = snapshot.asin
+    local translation_id = snapshot.request_id
+    local attempts = 0
+    local function fail(status, detail, retryable)
+        self:cleanupAnnotationTranslation(snapshot)
+        self:debugLog("annotations_sync_skipped", {
+            trigger = snapshot.trigger,
+            asin = asin,
+            annotations = #snapshot.desired,
+            status = status,
+        })
+        self:finishAnnotationReconcile(snapshot, false, retryable)
+        return false, detail
+    end
+    local function poll()
+        if self.annotation_sync_inflight ~= snapshot
+            or self.annotation_request_ids[asin] ~= translation_id
+        then
+            self:cleanupAnnotationTranslation(snapshot)
+            return
+        end
+        attempts = attempts + 1
+        if isReadable(snapshot.translation_failure_path) then
+            fail("position_translation_failed", "position translation failed", true)
+            return
+        end
+        local output = readWholeFile(snapshot.translation_result_path, 1024 * 1024)
+        if output then
+            self:cleanupAnnotationTranslation(snapshot)
+            local ok_json, result = pcall(json.decode, output)
+            local translated, detail
+            if ok_json then
+                translated, detail = validateTranslatedPositions(result, #snapshot.desired)
+            end
+            if not translated then
+                fail(
+                    detail == "position translation returned invalid coordinates"
+                        and "position_translation_invalid"
+                        or "position_translation_failed",
+                    detail or "position translation failed",
+                    false
+                )
+                return
+            end
+            self:startTranslatedAnnotationReconcile(snapshot, translated)
+            return
+        end
+        if attempts < 120 then
+            UIManager:scheduleIn(1, poll)
+        else
+            fail("position_translation_timeout", "position translation timed out", true)
+        end
+    end
+    UIManager:scheduleIn(1, poll)
+end
+
+function Goodreads:startAnnotationReconcile(snapshot)
+    local asin = snapshot.asin
+    local desired = snapshot.desired
+    local trigger = snapshot.trigger
+    self.annotation_sync_inflight = snapshot
+
+    if #desired == 0 then
+        return self:startTranslatedAnnotationReconcile(snapshot, {})
+    end
+
+    local kindle_helper
+    for _, candidate in ipairs(KINDLE_HELPER_PATHS) do
+        if isReadable(candidate) then
+            kindle_helper = candidate
+            break
+        end
+    end
+    if not kindle_helper then
+        self:debugLog("annotations_sync_skipped", {
+            trigger = trigger,
+            asin = asin,
+            status = "position_helper_unavailable",
+        })
+        self:finishAnnotationReconcile(snapshot, false, false)
+        return false, "position helper unavailable"
+    end
+
+    local translation_id = string.format("%d%d", os.time(), math.random(1000, 9999))
+    local base_path = "/tmp/goodreads-position-result-" .. translation_id
+    snapshot.translation_request_path = base_path .. ".request.json"
+    snapshot.translation_result_path = base_path .. ".json"
+    snapshot.translation_temporary_path = base_path .. ".tmp"
+    snapshot.translation_failure_path = base_path .. ".failed"
+    local request_items = {}
+    for _, item in ipairs(desired) do
+        table.insert(request_items, { start = item.start, ["end"] = item.finish })
+    end
+    local request_file = openPrivateFile(snapshot.translation_request_path)
+    if not request_file then
+        self:cleanupAnnotationTranslation(snapshot)
+        self:finishAnnotationReconcile(snapshot, false, true)
+        return false, "cannot create position request"
+    end
+    request_file:write(json.encode(request_items))
+    request_file:close()
+    os.execute("chmod 600 " .. util.shell_escape({ snapshot.translation_request_path }))
+
+    snapshot.request_id = "translation-" .. translation_id
+    self.annotation_request_ids[asin] = snapshot.request_id
+    local helper_command = util.shell_escape({
+        kindle_helper,
+        "translate-positions",
+        "--epub",
+        snapshot.epub_path,
+        "--request",
+        snapshot.translation_request_path,
+    })
+    local command = string.format(
+        "(umask 077; if %s > %s 2>/dev/null; then mv -f %s %s; "
+            .. "else rm -f %s; : > %s; fi; rm -f %s) >/dev/null 2>&1 &",
+        helper_command,
+        util.shell_escape({ snapshot.translation_temporary_path }),
+        util.shell_escape({ snapshot.translation_temporary_path }),
+        util.shell_escape({ snapshot.translation_result_path }),
+        util.shell_escape({ snapshot.translation_temporary_path }),
+        util.shell_escape({ snapshot.translation_failure_path }),
+        util.shell_escape({ snapshot.translation_request_path })
+    )
+    local status = os.execute(command)
+    if status ~= 0 then
+        self:cleanupAnnotationTranslation(snapshot)
+        self:finishAnnotationReconcile(snapshot, false, true)
+        return false, "cannot start position translation"
+    end
+    self:debugLog("annotations_translation_queued", {
+        trigger = trigger,
+        asin = asin,
+        annotations = #desired,
+        attempt = snapshot.attempt,
+        status = "queued",
+    })
+    self:pollAnnotationTranslation(snapshot)
     return true
 end
 

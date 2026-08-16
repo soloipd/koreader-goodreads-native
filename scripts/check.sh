@@ -29,6 +29,13 @@ grep -Fq '"$WATCHER" --once "$2"' "$plugin_dir/bin/manage-sync-receipts" \
     || { printf 'error: retry action does not request a one-shot replay\n' >&2; exit 1; }
 grep -Fq 'self:persistAnnotationOutbox(snapshot)' "$plugin_dir/main.lua" \
     || { printf 'error: captured annotations are not persisted before translation\n' >&2; exit 1; }
+grep -Fq 'self:pollAnnotationTranslation(snapshot)' "$plugin_dir/main.lua" \
+    || { printf 'error: annotation position translation is not polled asynchronously\n' >&2; exit 1; }
+if sed -n '/function Goodreads:startAnnotationReconcile/,/function Goodreads:resumeAnnotationOutbox/p' \
+    "$plugin_dir/main.lua" | grep -Fq 'io.popen'; then
+    printf 'error: annotation position translation still blocks the KOReader UI thread\n' >&2
+    exit 1
+fi
 grep -Fq 'result.outbox_acknowledged == "true"' "$plugin_dir/main.lua" \
     || { printf 'error: annotation success does not require outbox acknowledgement\n' >&2; exit 1; }
 grep -Fq 'failed_stage=outbox_superseded' "$plugin_dir/bin/sync-annotations" \

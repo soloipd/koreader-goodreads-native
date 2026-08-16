@@ -18,6 +18,8 @@ account token is required or stored.
 - Marks a book `Read` when KOReader completes it or reaches 99%.
 - Silently sends the live rounded whole-number percentage shortly after open,
   periodically while reading, on suspend/resume, and on close.
+- Runs KFX annotation-position translation in a detached worker, so page turns,
+  suspend, book close, and the Bookshelf do not wait for the ARM extractor.
 - Offers configurable 2, 5, 10, or 15 minute periodic checkpoints.
 - Offers a one-time 1–5 star chooser when a book is completed.
 - Supports manual rating updates and clearing an existing rating.
