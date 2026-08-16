@@ -26,6 +26,13 @@ processes, and 1,000 periodic progress checkpoints. A release is not published
 if any handoff is duplicated, the wrong process is selected, a periodic shelf
 action leaks through, or the singleton watcher guarantee fails.
 
+The required behavior check additionally reconciles the maximum 1,000 native
+annotations in one snapshot and verifies a mass native deletion preserves every
+locally edited note and style while removing only unchanged native-owned data.
+The `stress` target reruns that suite in fresh private state before executing
+the lifecycle/concurrency stress tests. Both CI and tagged releases invoke this
+target, so a release cannot bypass it.
+
 The release plugin is generated in `goodreads.koplugin/`; install that entire
 directory on a test Kindle. Never test with account credentials embedded in
 source or command-line arguments—the implementation must continue to use only

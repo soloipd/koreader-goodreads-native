@@ -166,6 +166,10 @@ local DEBUG_FIELD_ORDER = {
     "interval_seconds",
     "attempt",
     "duplicates_collapsed",
+    "ownership_detached",
+    "legacy_detached",
+    "tombstones_blocked",
+    "tombstones_cleared",
 }
 local DEBUG_ALLOWED_FIELDS = {}
 for _, key in ipairs(DEBUG_FIELD_ORDER) do
@@ -1309,7 +1313,8 @@ local function readNativeImportSnapshot(asin)
     end
     local count = tonumber(fields.count)
     local native_path = hexDecode(fields.native_path_hex, 4096)
-    if fields.version ~= "1" or fields.success ~= "true" or fields.asin ~= asin
+    if fields.version ~= "1" or fields.success ~= "true"
+        or fields.snapshot_complete ~= "true" or fields.asin ~= asin
         or not count or count < 0 or count > 1000 or count ~= math.floor(count)
         or not native_path or not native_path:match("^/mnt/us/documents/")
         or type(fields.request_id) ~= "string" or not fields.request_id:match("^%d+$")
@@ -1317,7 +1322,8 @@ local function readNativeImportSnapshot(asin)
         return nil, "invalid native import metadata"
     end
     local allowed = {
-        version = true, success = true, asin = true, request_id = true,
+        version = true, success = true, snapshot_complete = true,
+        asin = true, request_id = true,
         native_path_hex = true, count = true,
     }
     local items, note_bytes = {}, 0
@@ -1348,7 +1354,13 @@ local function readNativeImportSnapshot(asin)
     for key in pairs(fields) do
         if not allowed[key] then return nil, "unexpected native import field" end
     end
-    return { path = path, native_path = native_path, items = items }
+    return {
+        path = path,
+        asin = asin,
+        native_path = native_path,
+        snapshot_complete = true,
+        items = items,
+    }
 end
 
 function Goodreads:startNativeAnnotationWatcher()
@@ -1360,69 +1372,374 @@ function Goodreads:startNativeAnnotationWatcher()
     return true
 end
 
-function Goodreads:applyNativeAnnotationImport(reader, snapshot, positions)
-    local existing = {}
-    for _, item in ipairs(reader.annotation and reader.annotation.annotations or {}) do
-        if item.drawer and type(item.pos0) == "string" and type(item.pos1) == "string" then
-            local first = item.pos0 < item.pos1 and item.pos0 or item.pos1
-            local second = item.pos0 < item.pos1 and item.pos1 or item.pos0
-            existing[first .. "\0" .. second] = item
+local function nativeAnnotationKey(item)
+    if type(item) ~= "table" or type(item.start_long) ~= "string"
+        or type(item.end_long) ~= "string"
+    then
+        return nil
+    end
+    return item.start_long .. ":" .. item.end_long
+end
+
+local function xpointerRangeKey(pos0, pos1)
+    if type(pos0) ~= "string" or type(pos1) ~= "string" then return nil end
+    local first = pos0 < pos1 and pos0 or pos1
+    local second = pos0 < pos1 and pos1 or pos0
+    return first .. "\0" .. second
+end
+
+local function validNativeKey(key)
+    if type(key) ~= "string" then return false end
+    local start_long, end_long = key:match("^(A[%w%+/]+):(A[%w%+/]+)$")
+    return start_long ~= nil and #start_long == 12 and #end_long == 12
+end
+
+local function validNativeProvenance(item)
+    local provenance = type(item) == "table" and item.goodreads_native_provenance
+    if type(provenance) ~= "table" or provenance.version ~= 1
+        or type(provenance.key) ~= "string"
+        or type(provenance.highlight_created) ~= "boolean"
+        or type(provenance.note_imported) ~= "boolean"
+        or type(provenance.note_value) ~= "string" or #provenance.note_value > 65536
+        or type(provenance.drawer) ~= "string" or #provenance.drawer > 64
+        or (provenance.color ~= nil
+            and (type(provenance.color) ~= "string" or #provenance.color > 64))
+    then
+        return nil
+    end
+    if not validNativeKey(provenance.key) then return nil end
+    return provenance
+end
+
+local function setNativeProvenance(item, key, highlight_created, note_imported, note_value)
+    item.goodreads_native_import = true -- retained for v0.7 sidecar compatibility
+    item.goodreads_native_provenance = {
+        version = 1,
+        key = key,
+        highlight_created = highlight_created == true,
+        note_imported = note_imported == true,
+        -- This private value remains inside KOReader's own annotation metadata.
+        -- It is never copied to receipts, diagnostics, or logs.
+        note_value = note_value or "",
+        drawer = type(item.drawer) == "string" and item.drawer or "",
+        color = type(item.color) == "string" and item.color or nil,
+    }
+    return item.goodreads_native_provenance
+end
+
+local function clearNativeProvenance(item)
+    item.goodreads_native_import = nil
+    item.goodreads_native_provenance = nil
+end
+
+local function nativeStyleUnchanged(item, provenance)
+    return (item.drawer or "") == provenance.drawer
+        and (item.color or "") == (provenance.color or "")
+end
+
+function Goodreads:rememberNativeAnnotationDeletion(items)
+    local asin = getBookAsin(self.ui)
+    if type(items) ~= "table" or type(items.index_modified) ~= "number"
+        or items.index_modified >= 0 or not isAsin(asin)
+    then
+        return false
+    end
+    local provenance = validNativeProvenance(items[1])
+    if not provenance then return false end
+    local tombstones = self.settings.native_annotation_tombstones
+    if type(tombstones) ~= "table" then
+        tombstones = {}
+        self.settings.native_annotation_tombstones = tombstones
+    end
+    local book = tombstones[asin]
+    if type(book) ~= "table" then
+        book = {}
+        tombstones[asin] = book
+    end
+    local count, oldest_key, oldest_time = 0, nil, math.huge
+    for key, timestamp in pairs(book) do
+        if validNativeKey(key) and type(timestamp) == "number" then
+            count = count + 1
+            if timestamp < oldest_time then oldest_key, oldest_time = key, timestamp end
+        else
+            book[key] = nil
         end
     end
-    local modified, added, notes_added = {}, 0, 0
+    if book[provenance.key] == nil and count >= 1000 and oldest_key then
+        book[oldest_key] = nil
+    end
+    book[provenance.key] = os.time()
+    self:saveSettings()
+    self:debugLog("native_annotation_tombstoned", {
+        trigger = "local_delete",
+        annotations = 1,
+        status = "waiting_native_echo",
+    })
+    return true
+end
+
+function Goodreads:applyNativeAnnotationImport(reader, snapshot, positions)
+    local allow_deletions = snapshot.snapshot_complete == true
+    local annotations = reader.annotation and reader.annotation.annotations or {}
+    local existing = {}
+    for _, item in ipairs(annotations) do
+        if item.drawer and type(item.pos0) == "string" and type(item.pos1) == "string" then
+            existing[xpointerRangeKey(item.pos0, item.pos1)] = item
+        end
+    end
+
+    local modified, modified_set = {}, {}
+    local function markModified(item)
+        if not modified_set[item] then
+            modified_set[item] = true
+            table.insert(modified, item)
+        end
+    end
+
+    local native_keys, additions = {}, {}
+    local tombstones = isAsin(snapshot.asin)
+        and type(self.settings.native_annotation_tombstones) == "table"
+        and self.settings.native_annotation_tombstones[snapshot.asin] or nil
+    if type(tombstones) ~= "table" then tombstones = {} end
+    local tombstones_to_clear = {}
+    local tombstones_blocked = 0
+    local highlight_delta, note_delta = 0, 0
+    local added, deleted, notes_added, notes_updated, notes_deleted = 0, 0, 0, 0, 0
+    local ownership_detached, legacy_detached = 0, 0
+
     for index, imported in ipairs(snapshot.items) do
         local translated = positions[index]
         local pos0, pos1 = translated.start.xpointer, translated["end"].xpointer
-        local first = pos0 < pos1 and pos0 or pos1
-        local second = pos0 < pos1 and pos1 or pos0
-        local key = first .. "\0" .. second
-        local current = existing[key]
-        if current then
-            if imported.note ~= "" and (current.note == nil or current.note == "") then
+        local native_key = nativeAnnotationKey(imported)
+        local position_key = xpointerRangeKey(pos0, pos1)
+        if not native_key or not position_key then return false, "invalid native import identity" end
+        native_keys[native_key] = true
+        local current = existing[position_key]
+        if tombstones[native_key] ~= nil and not current then
+            -- Suppress a stale native echo until a complete snapshot omits the
+            -- key and thereby confirms the outbound deletion.
+            tombstones_blocked = tombstones_blocked + 1
+        elseif current then
+            if tombstones[native_key] ~= nil then
+                -- The range exists locally again, so the user recreated or kept it.
+                tombstones_to_clear[native_key] = true
+            end
+            local had_native_metadata = current.goodreads_native_import ~= nil
+                or current.goodreads_native_provenance ~= nil
+            local provenance = validNativeProvenance(current)
+            if not provenance and had_native_metadata
+            then
+                -- v0.7 did not distinguish a created highlight from an
+                -- existing highlight whose empty note was filled. Preserve it
+                -- and detach that ambiguous legacy marker instead of guessing.
+                clearNativeProvenance(current)
+                markModified(current)
+                legacy_detached = legacy_detached + 1
+            elseif provenance then
+                local changed = false
+                if provenance.key ~= native_key then
+                    provenance.key = native_key
+                    changed = true
+                end
+                if provenance.highlight_created
+                    and not nativeStyleUnchanged(current, provenance)
+                then
+                    provenance.highlight_created = false
+                    changed = true
+                end
+
+                local current_note = current.note or ""
+                if current_note ~= provenance.note_value then
+                    -- A local note edit wins over a stale native snapshot. If
+                    -- Kindle later echoes that exact edit, rebase the private
+                    -- baseline so subsequent two-way changes remain safe.
+                    if imported.note == current_note then
+                        provenance.note_value = current_note
+                        provenance.note_imported = current_note ~= ""
+                        changed = true
+                    end
+                elseif imported.note ~= provenance.note_value
+                    and (imported.note ~= "" or allow_deletions)
+                then
+                    local old_note = current_note
+                    current.note = imported.note ~= "" and imported.note or nil
+                    provenance.note_value = imported.note
+                    provenance.note_imported = imported.note ~= ""
+                    changed = true
+                    if old_note == "" and imported.note ~= "" then
+                        highlight_delta = highlight_delta - 1
+                        note_delta = note_delta + 1
+                        notes_added = notes_added + 1
+                    elseif old_note ~= "" and imported.note == "" then
+                        highlight_delta = highlight_delta + 1
+                        note_delta = note_delta - 1
+                        notes_deleted = notes_deleted + 1
+                    else
+                        notes_updated = notes_updated + 1
+                    end
+                end
+
+                if provenance and not provenance.highlight_created
+                    and not provenance.note_imported
+                then
+                    clearNativeProvenance(current)
+                    provenance = nil
+                    changed = true
+                end
+                if changed then markModified(current) end
+            end
+
+            if not had_native_metadata and not validNativeProvenance(current)
+                and imported.note ~= "" and (current.note == nil or current.note == "")
+            then
                 current.note = imported.note
-                current.goodreads_native_import = true
-                table.insert(modified, current)
+                setNativeProvenance(current, native_key, false, true, imported.note)
+                markModified(current)
+                highlight_delta = highlight_delta - 1
+                note_delta = note_delta + 1
                 notes_added = notes_added + 1
             end
         else
-            local ok_text, text = pcall(reader.document.getTextFromXPointers,
-                reader.document, pos0, pos1)
-            local chapter
-            if reader.toc and type(reader.toc.getTocTitleByPage) == "function" then
-                local ok_chapter, value = pcall(reader.toc.getTocTitleByPage,
-                    reader.toc, pos0)
-                if ok_chapter and value ~= "" then chapter = value end
-            end
-            local item = {
-                page = pos0,
+            table.insert(additions, {
+                imported = imported,
+                native_key = native_key,
+                position_key = position_key,
                 pos0 = pos0,
                 pos1 = pos1,
-                text = ok_text and text or "",
-                drawer = reader.view and reader.view.highlight
-                    and reader.view.highlight.saved_drawer or "lighten",
-                note = imported.note ~= "" and imported.note or nil,
-                chapter = chapter,
-                goodreads_native_import = true,
-            }
-            reader.annotation:addItem(item)
-            existing[key] = item
-            table.insert(modified, item)
-            added = added + 1
-            if item.note then notes_added = notes_added + 1 end
+            })
         end
     end
+
+    for key in pairs(tombstones) do
+        if allow_deletions and validNativeKey(key) and not native_keys[key] then
+            tombstones_to_clear[key] = true
+        end
+    end
+
+    -- Reconcile removals before adding new items so array indices cannot move
+    -- underneath the descending deletion pass.
+    for annotation_index = #annotations, 1, -1 do
+        local item = annotations[annotation_index]
+        local provenance = validNativeProvenance(item)
+        if allow_deletions and provenance and not native_keys[provenance.key] then
+            local current_note = item.note or ""
+            local note_unchanged = current_note == provenance.note_value
+            if provenance.highlight_created and note_unchanged
+                and nativeStyleUnchanged(item, provenance)
+            then
+                table.remove(annotations, annotation_index)
+                clearNativeProvenance(item)
+                markModified(item)
+                deleted = deleted + 1
+                if current_note == "" then
+                    highlight_delta = highlight_delta - 1
+                else
+                    note_delta = note_delta - 1
+                    notes_deleted = notes_deleted + 1
+                end
+            else
+                if provenance.note_imported and note_unchanged and current_note ~= "" then
+                    item.note = nil
+                    highlight_delta = highlight_delta + 1
+                    note_delta = note_delta - 1
+                    notes_deleted = notes_deleted + 1
+                end
+                clearNativeProvenance(item)
+                markModified(item)
+                ownership_detached = ownership_detached + 1
+            end
+        elseif not provenance and (item.goodreads_native_import ~= nil
+            or item.goodreads_native_provenance ~= nil)
+        then
+            clearNativeProvenance(item)
+            markModified(item)
+            legacy_detached = legacy_detached + 1
+        end
+    end
+
+    for _, pending in ipairs(additions) do
+        local imported, pos0, pos1 = pending.imported, pending.pos0, pending.pos1
+        local ok_text, text = pcall(reader.document.getTextFromXPointers,
+            reader.document, pos0, pos1)
+        local chapter
+        if reader.toc and type(reader.toc.getTocTitleByPage) == "function" then
+            local ok_chapter, value = pcall(reader.toc.getTocTitleByPage,
+                reader.toc, pos0)
+            if ok_chapter and value ~= "" then chapter = value end
+        end
+        local item = {
+            page = pos0,
+            pos0 = pos0,
+            pos1 = pos1,
+            text = ok_text and text or "",
+            drawer = reader.view and reader.view.highlight
+                and reader.view.highlight.saved_drawer or "lighten",
+            note = imported.note ~= "" and imported.note or nil,
+            chapter = chapter,
+        }
+        setNativeProvenance(item, pending.native_key, true,
+            imported.note ~= "", imported.note)
+        reader.annotation:addItem(item)
+        existing[pending.position_key] = item
+        markModified(item)
+        added = added + 1
+        if item.note then
+            note_delta = note_delta + 1
+            notes_added = notes_added + 1
+        else
+            highlight_delta = highlight_delta + 1
+        end
+    end
+
+    if #modified == 0 and self.native_import_retry_path == snapshot.path
+        and type(self.native_import_retry_event) == "table"
+    then
+        modified = self.native_import_retry_event
+    end
     if #modified > 0 then
-        modified.nb_highlights_added = added
-        modified.nb_notes_added = notes_added
+        if highlight_delta ~= 0 then modified.nb_highlights_added = highlight_delta end
+        if note_delta ~= 0 then modified.nb_notes_added = note_delta end
         local ok_event = pcall(reader.handleEvent, reader,
             Event:new("AnnotationsModified", modified))
-        if not ok_event then return false, "KOReader annotation event failed" end
+        if not ok_event then
+            self.native_import_retry_path = snapshot.path
+            self.native_import_retry_event = modified
+            return false, "KOReader annotation event failed"
+        end
+    end
+    self.native_import_retry_path = nil
+    self.native_import_retry_event = nil
+    local tombstones_cleared = 0
+    for key in pairs(tombstones_to_clear) do
+        if tombstones[key] ~= nil then
+            tombstones[key] = nil
+            tombstones_cleared = tombstones_cleared + 1
+        end
+    end
+    if tombstones_cleared > 0 then
+        local has_tombstones = false
+        for _ in pairs(tombstones) do has_tombstones = true break end
+        if not has_tombstones and isAsin(snapshot.asin)
+            and type(self.settings.native_annotation_tombstones) == "table"
+        then
+            self.settings.native_annotation_tombstones[snapshot.asin] = nil
+        end
+        self:saveSettings()
     end
     os.remove(snapshot.path)
     self:debugLog("native_annotations_imported", {
         trigger = "native_import",
         annotations = added,
+        highlights_created = added,
+        highlights_deleted = deleted,
         notes = notes_added,
+        notes_created = notes_added,
+        notes_updated = notes_updated,
+        notes_deleted = notes_deleted,
+        ownership_detached = ownership_detached,
+        legacy_detached = legacy_detached,
+        tombstones_blocked = tombstones_blocked,
+        tombstones_cleared = tombstones_cleared,
         status = #modified > 0 and "merged" or "already_current",
     })
     return true
@@ -1574,6 +1891,9 @@ function Goodreads:init()
     if type(self.settings.ratings) ~= "table" then
         self.settings.ratings = {}
     end
+    if type(self.settings.native_annotation_tombstones) ~= "table" then
+        self.settings.native_annotation_tombstones = {}
+    end
     G_reader_settings:saveSetting("goodreads_native", self.settings)
 
     self.last_sync = nil
@@ -1592,6 +1912,8 @@ function Goodreads:init()
     self.annotation_pending_snapshots = {}
     self.annotation_pending_order = {}
     self.native_import_inflight = false
+    self.native_import_retry_path = nil
+    self.native_import_retry_event = nil
     self.ui.menu:registerToMainMenu(self)
     self:applyReaderHook()
     if not outbox_resume_scheduled then
@@ -1879,6 +2201,7 @@ function Goodreads:onResume()
 end
 
 function Goodreads:onAnnotationsModified(items)
+    self:rememberNativeAnnotationDeletion(items)
     local stats = annotationStats(self.ui)
     local changed = type(items) == "table" and #items or 0
     self.last_annotation_event = {

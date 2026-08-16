@@ -6,7 +6,7 @@ project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 plugin_dir="$project_root/goodreads.koplugin"
 agent_jar="$plugin_dir/bin/goodreads-progress-agent-v2.jar"
 annotation_agent_jar="$plugin_dir/bin/goodreads-annotation-agent-v27.jar"
-annotation_export_jar="$plugin_dir/bin/goodreads-annotation-export-agent-v1.jar"
+annotation_export_jar="$plugin_dir/bin/goodreads-annotation-export-agent-v2.jar"
 
 sh -n "$plugin_dir/bin/sync-progress"
 sh -n "$plugin_dir/bin/sync-rating"
@@ -190,9 +190,13 @@ annotation_entries="$(unzip -Z1 "$annotation_agent_jar")"
 annotation_export_entries="$(unzip -Z1 "$annotation_export_jar")"
 annotation_agent_count="$(find "$plugin_dir/bin" -maxdepth 1 -type f \
     -name 'goodreads-annotation-agent-v*.jar' | wc -l | tr -d '[:space:]')"
+annotation_export_agent_count="$(find "$plugin_dir/bin" -maxdepth 1 -type f \
+    -name 'goodreads-annotation-export-agent-v*.jar' | wc -l | tr -d '[:space:]')"
 
 [ "$annotation_agent_count" = "1" ] \
     || { printf 'error: stale annotation agent JARs would be packaged\n' >&2; exit 1; }
+[ "$annotation_export_agent_count" = "1" ] \
+    || { printf 'error: stale annotation export agent JARs would be packaged\n' >&2; exit 1; }
 
 grep -Fqx 'Agent-Class: GoodreadsProgressAgentV2' <<<"$progress_manifest" \
     || { printf 'error: agent manifest has the wrong Agent-Class\n' >&2; exit 1; }
@@ -206,9 +210,9 @@ grep -Fqx 'GoodreadsAnnotationAgentV27.class' <<<"$annotation_entries" \
     || { printf 'error: annotation agent JAR lacks its main class\n' >&2; exit 1; }
 grep -Fqx 'GoodreadsAnnotationAgentV27$CloudAnnotationHandler.class' <<<"$annotation_entries" \
     || { printf 'error: annotation agent JAR lacks its cloud proxy handler\n' >&2; exit 1; }
-grep -Fqx 'Agent-Class: GoodreadsAnnotationExportAgentV1' <<<"$annotation_export_manifest" \
+grep -Fqx 'Agent-Class: GoodreadsAnnotationExportAgentV2' <<<"$annotation_export_manifest" \
     || { printf 'error: annotation export agent manifest is invalid\n' >&2; exit 1; }
-grep -Fqx 'GoodreadsAnnotationExportAgentV1.class' <<<"$annotation_export_entries" \
+grep -Fqx 'GoodreadsAnnotationExportAgentV2.class' <<<"$annotation_export_entries" \
     || { printf 'error: annotation export agent JAR lacks its main class\n' >&2; exit 1; }
 
 javac_bin="${JAVAC:-javac}"
@@ -225,10 +229,10 @@ if command -v "$javac_bin" >/dev/null 2>&1 && command -v "$java_bin" >/dev/null 
     "$javac_bin" --release 8 -Xlint:-options -d "$annotation_test_dir" \
         "$project_root/agent/src/GoodreadsAnnotationAgentV3.java" \
         "$project_root/agent/src/GoodreadsAnnotationAgentV27.java" \
-        "$project_root/agent/src/GoodreadsAnnotationExportAgentV1.java" \
+        "$project_root/agent/src/GoodreadsAnnotationExportAgentV2.java" \
         "${annotation_test_sources[@]}"
     "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationAgentV27Test
-    "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationExportAgentV1Test
+    "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationExportAgentV2Test
 else
     printf 'warning: Java toolchain unavailable; annotation agent behavior tests were skipped\n' >&2
 fi

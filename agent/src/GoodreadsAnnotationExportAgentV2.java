@@ -12,8 +12,8 @@ import java.util.Map;
 import java.util.Properties;
 
 /** Read-only export of the exact active Kindle book's highlight/note ranges. */
-public final class GoodreadsAnnotationExportAgentV1 {
-    private GoodreadsAnnotationExportAgentV1() {}
+public final class GoodreadsAnnotationExportAgentV2 {
+    private GoodreadsAnnotationExportAgentV2() {}
 
     public static void agentmain(String payloadPath, Instrumentation ignored) {
         PrintWriter out = null;
@@ -103,6 +103,9 @@ public final class GoodreadsAnnotationExportAgentV1 {
                 out.println(base + "end_short=" + record.endShort);
                 out.println(base + "note_hex=" + hexEncode(record.note));
             }
+            // Consumers may perform deletions only when this explicit marker
+            // proves that enumeration, validation, and serialization finished.
+            out.println("snapshot_complete=true");
             out.println("success=true");
         } catch (Throwable error) {
             if (out != null) {

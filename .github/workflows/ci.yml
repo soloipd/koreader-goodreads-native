@@ -25,7 +25,7 @@ jobs:
       - name: Check
         run: make check
 
-      - name: Stress lifecycle and concurrency
+      - name: Stress annotations, lifecycle, and concurrency
         run: make stress
 
       - name: Package

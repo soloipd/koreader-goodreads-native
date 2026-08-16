@@ -10,10 +10,10 @@ import java.nio.file.Paths;
 import java.util.Properties;
 import testsupport.Fakes;
 
-public final class GoodreadsAnnotationExportAgentV1Test {
+public final class GoodreadsAnnotationExportAgentV2Test {
     private static int sequence = 8100000;
 
-    private GoodreadsAnnotationExportAgentV1Test() {}
+    private GoodreadsAnnotationExportAgentV2Test() {}
 
     public static void main(String[] ignored) throws Exception {
         Fakes.SDK sdk = new Fakes.SDK();
@@ -29,6 +29,8 @@ public final class GoodreadsAnnotationExportAgentV1Test {
 
         Properties exported = run("/mnt/us/documents/Test_B0FLB24198.kfx");
         expect("true", exported.getProperty("success"), "export should succeed");
+        expect("true", exported.getProperty("snapshot_complete"),
+            "completed export must attest snapshot completeness");
         expect("2", exported.getProperty("count"), "ranges should collapse highlight/note pairs");
         expect("AAAAAAAAAAAA", exported.getProperty("item.0.start"), "start should be exact");
         expect("100", exported.getProperty("item.0.start_short"), "short start should be exact");
@@ -78,7 +80,7 @@ public final class GoodreadsAnnotationExportAgentV1Test {
         FileOutputStream output = new FileOutputStream(payloadPath.toFile());
         payload.store(output, null);
         output.close();
-        GoodreadsAnnotationExportAgentV1.agentmain(payloadPath.toString(), null);
+        GoodreadsAnnotationExportAgentV2.agentmain(payloadPath.toString(), null);
         Properties result = new Properties();
         FileInputStream input = new FileInputStream(resultPath.toFile());
         result.load(input);

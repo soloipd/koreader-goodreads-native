@@ -160,14 +160,33 @@ A singleton `lipc-wait-event` watcher captures a read-only snapshot while the
 native reader owns the active local `/mnt/us/documents` book. The exporter
 performs no ReaderSDK write, KPP notification, journal entry, or sync request.
 Its private result is atomically moved into a root-only native-import inbox.
+The exporter emits `snapshot_complete=true` only after the entire bounded list
+has been serialized. Destructive reconciliation and tombstone acknowledgement
+require that attestation; `success=true` alone is insufficient.
 
 When the matching converted book next opens or resumes, KOReader runs
 `kindle-helper translate-native-positions` as a detached batch job. Verified
 XPointers merge through `ReaderAnnotation:addItem` and one
-`AnnotationsModified` event. Missing ranges are added, empty notes may be
-filled, and conflicting non-empty KOReader notes win. The snapshot is removed
-only after that persistence event succeeds. Native deletion propagation is
-outside the experimental v0.7.0 contract.
+`AnnotationsModified` event. Component-level provenance distinguishes a
+native-created highlight from an imported note attached to a pre-existing
+KOReader highlight. Complete snapshots can therefore reconcile native note
+edits, note removal, and safe highlight deletion.
+
+A native-created highlight is deleted only if its note and style still match
+the imported baseline. A local note edit wins over stale snapshots and protects
+the highlight; an exact native echo rebases the baseline and restores normal
+two-way ownership. A local style change detaches highlight ownership. For a
+pre-existing KOReader highlight, only an unchanged imported note may be removed.
+Ambiguous v0.7 markers are detached without deletion. The snapshot is removed
+only after the persistence event succeeds; failed events retain an in-memory
+replay record and the root-only snapshot. The private note baseline exists only
+in KOReader's own metadata and is excluded from logs and receipts.
+
+An official KOReader removal event for a provenance-bearing highlight records
+a bounded coordinate-only tombstone in plugin settings. A stale complete native
+snapshot containing that key is suppressed rather than re-imported. A later
+complete snapshot that omits the key acknowledges and removes the tombstone.
+No selected text or note content enters this deletion ledger.
 
 ## Upgrade behavior
 
