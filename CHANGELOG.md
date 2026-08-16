@@ -3,6 +3,22 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-08-16
+
+### Fixed
+
+- KFX annotation-position translation now runs in a detached, mode-0600
+  worker instead of blocking KOReader's UI thread during page turns, suspend,
+  book close, or the return to Bookshelf.
+- Translation output is committed by atomic rename and polled asynchronously.
+  Invalid, failed, and timed-out jobs retain the durable source outbox and use
+  the existing bounded retry path.
+
+### Added
+
+- Regression checks that reject a blocking annotation translator and verify
+  the detached translation-to-native-helper handoff.
+
 ## [0.6.0] - 2026-08-16
 
 ### Added

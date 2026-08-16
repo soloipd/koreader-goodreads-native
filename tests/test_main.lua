@@ -321,6 +321,99 @@ assert(normalized_ranges[2].note ~= "", "a non-empty duplicate note must be reta
 assert(normalized_note_bytes == #normalized_ranges[2].note,
     "payload limits must count only retained duplicate-note bytes")
 
+-- Position translation must be detached from KOReader's UI thread. Closing,
+-- suspending, or editing an annotation may persist a snapshot synchronously,
+-- but must only spawn the translator and poll for its atomic result.
+local nonblocking = newPlugin(settings({ annotation_sync_enabled = true }))
+local nonblocking_snapshot = {
+    asin = "B0FLB24198",
+    epub_path = "/mnt/us/koreader/cache/kindle.koplugin/test.epub",
+    native_path = "/mnt/us/documents/Test_B0FLB24198.kfx",
+    desired = {
+        { start = "/body/p[1].0", finish = "/body/p[1].10", note = "" },
+    },
+    trigger = "close",
+    token = 1,
+    sequence = 1,
+    outbox_checksum = string.rep("a", 64),
+    attempt = 0,
+}
+nonblocking.annotation_snapshot_tokens.B0FLB24198 = 1
+local original_nonblocking_open = io.open
+local original_nonblocking_popen = io.popen
+io.open = function(path, mode)
+    if path == "/mnt/us/koreader/plugins/kindle.koplugin/kindle-helper"
+        and mode == "rb"
+    then
+        return { close = function() end }
+    end
+    if type(path) == "string"
+        and path:match("^/tmp/goodreads%-position%-result%-.+%.request%.json$")
+    then
+        return {
+            write = function() end,
+            close = function() end,
+        }
+    end
+    if path == nonblocking_snapshot.translation_result_path and mode == "rb" then
+        return {
+            read = function() return "coordinate-only result" end,
+            close = function() end,
+        }
+    end
+    if type(path) == "string"
+        and path:match("^/tmp/goodreads%-annotations%-.+%.properties$")
+    then
+        return {
+            write = function() end,
+            close = function() end,
+        }
+    end
+    return original_nonblocking_open(path, mode)
+end
+io.popen = function()
+    error("position translation must not use blocking io.popen")
+end
+local commands_before_translation = #commands
+local scheduled_before_translation = #scheduled
+assert(nonblocking:startAnnotationReconcile(nonblocking_snapshot))
+assert(nonblocking.annotation_sync_inflight == nonblocking_snapshot,
+    "background translation must reserve the single-flight lane")
+assert(#commands >= commands_before_translation + 2,
+    "background translation must create a private request and spawn a worker")
+local translation_command = commands[#commands]
+assert(translation_command:match("translate%-positions"),
+    "background worker must invoke the batch position translator")
+assert(translation_command:match("&$"),
+    "position translator must be detached from KOReader's UI thread")
+assert(#scheduled == scheduled_before_translation + 1,
+    "translation result must be polled asynchronously")
+local original_json_decode = package.loaded.json.decode
+package.loaded.json.decode = function()
+    return {
+        ok = true,
+        positions = {
+            {
+                start = { long = "AAAAAAAAAAAA", pid = 1 },
+                ["end"] = { long = "AAAAAAAAAAAB", pid = 2 },
+            },
+        },
+    }
+end
+local translation_poll = table.remove(scheduled, scheduled_before_translation + 1)
+translation_poll()
+assert(commands[#commands]:match("sync%-annotations"),
+    "validated coordinates must queue the native annotation helper")
+assert(nonblocking_snapshot.translation_result_path == nil,
+    "successful translation must remove transient coordinate files")
+assert(#scheduled == scheduled_before_translation + 1,
+    "native annotation result must be polled asynchronously")
+table.remove(scheduled)
+package.loaded.json.decode = original_json_decode
+nonblocking.annotation_sync_inflight = nil
+io.open = original_nonblocking_open
+io.popen = original_nonblocking_popen
+
 -- Only one native annotation agent may run at once. New changes for the same
 -- book must replace the queued snapshot, while changes for another book remain
 -- queued behind it.

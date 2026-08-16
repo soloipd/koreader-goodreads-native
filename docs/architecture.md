@@ -36,6 +36,11 @@ The close hook resolves `reader.goodreads_native`, the active ReaderUI plugin
 instance, rather than retaining the FileManager instance that installed the
 global wrapper. This makes automatic behavior honor current menu settings.
 
+KFX annotation-position translation runs as a mode-0600 detached job. KOReader
+polls an atomically renamed, coordinate-only result, so reader lifecycle hooks
+do not wait for the ARM extractor. The private durable outbox remains
+replayable if KOReader exits before that detached job finishes.
+
 Shell-level delays survive a complete KOReader exit and allow other close hooks
 to finish writing the Kindle content database first. While a document is open,
 `ReaderPaging:getLastPercent()` or `ReaderRolling:getLastPercent()` is the
