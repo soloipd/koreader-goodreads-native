@@ -52,6 +52,7 @@ local ANNOTATION_RESULT_KEYS = {
     request_id = true,
     requested = true,
     local_success = true,
+    local_verified = true,
     success = true,
     failed_stage = true,
     error_class = true,
@@ -75,6 +76,7 @@ local DEBUG_FIELD_ORDER = {
     "error_envelope",
     "success",
     "local_success",
+    "local_verified",
     "failed_stage",
     "error_class",
     "changed",
@@ -771,7 +773,9 @@ function Goodreads:pollAnnotationResult(snapshot)
         attempts = attempts + 1
         local result = readKeyValueFile(ANNOTATION_RESULT_FILE, ANNOTATION_RESULT_KEYS)
         if result and result.asin == asin and result.request_id == request_id then
-            local success = result.success == "true" and result.sync_enqueued == "true"
+            local success = result.success == "true"
+                and result.local_verified == "true"
+                and result.sync_enqueued == "true"
             self:debugLog("annotations_sync_result", {
                 trigger = trigger,
                 asin = asin,
@@ -779,6 +783,7 @@ function Goodreads:pollAnnotationResult(snapshot)
                 status = success and "accepted" or "failed",
                 success = success,
                 local_success = result.local_success,
+                local_verified = result.local_verified,
                 failed_stage = result.failed_stage,
                 error_class = result.error_class,
                 highlights_created = result.highlights_created,
@@ -1769,9 +1774,11 @@ function Goodreads:showDiagnostics()
     if self.last_annotation_sync_result then
         local result = self.last_annotation_sync_result
         table.insert(lines, string.format(
-            _("Latest annotation sync: %s; native queue %s; %s highlight(s) created, %s note(s) created, %s note(s) updated"),
-            result.success == "true" and result.sync_enqueued == "true"
+            _("Latest annotation sync: %s; durable native write %s; native queue %s; %s highlight(s) created, %s note(s) created, %s note(s) updated"),
+            result.success == "true" and result.local_verified == "true"
+                and result.sync_enqueued == "true"
                 and _("accepted") or _("failed"),
+            result.local_verified == "true" and _("verified") or _("not verified"),
             result.sync_enqueued == "true" and _("accepted") or _("not queued"),
             result.highlights_created or "0",
             result.notes_created or "0",

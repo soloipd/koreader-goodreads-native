@@ -3,6 +3,21 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-08-16
+
+### Fixed
+
+- Native highlight and note reconciliation now uses Kindle ReaderSDK's
+  high-level create/update/delete methods. These methods also write through the
+  KSDK annotation proxy; the lower-level methods used in 0.3.0 only changed an
+  in-memory annotation cache and could report success without a durable native
+  annotation.
+- Annotation sync now closes and reopens the native book and verifies every
+  desired create, edit, and deletion before reporting success or asking
+  Amazon's annotation service to enqueue a cloud sync.
+- Diagnostics distinguish a verified durable native write from an unverified
+  or failed attempt, preventing cache-only false-positive results.
+
 ## [0.3.0] - 2026-08-15
 
 ### Added
