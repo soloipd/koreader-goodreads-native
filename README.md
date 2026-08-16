@@ -21,7 +21,7 @@ account token is required or stored.
 - Runs KFX annotation-position translation in a detached worker, so page turns,
   suspend, book close, and the Bookshelf do not wait for the ARM extractor.
 - Optionally imports native Kindle highlights and notes into the matching
-  converted KOReader book using an additive, conflict-safe experimental path.
+  converted KOReader book using provenance-aware, conflict-safe reconciliation.
 - Offers configurable 2, 5, 10, or 15 minute periodic checkpoints.
 - Offers a one-time 1–5 star chooser when a book is completed.
 - Supports manual rating updates and clearing an existing rating.
@@ -30,6 +30,8 @@ account token is required or stored.
   rapid edits and removals converge on the latest KOReader state.
 - Keeps shelf and percentage synchronization independently configurable.
 - Provides opt-in, redacted, rotating diagnostics and an on-device status view.
+- Includes a read-only, privacy-redacted SSH `doctor` that detects duplicate
+  reader roots and missing runtime prerequisites without launching a reader.
 - Persists a text-free per-book annotation receipt across KOReader restarts,
   distinguishing saved, waiting-for-Kindle, Amazon-queued, and independently
   cloud-observed states.
@@ -85,6 +87,9 @@ scp -P PORT -r goodreads.koplugin \
 
 Restart KOReader after an install or upgrade. A full Kindle reboot is normally
 unnecessary because the release agent uses a versioned class name.
+
+The active product plan and release gates are maintained in
+[ROADMAP.md](ROADMAP.md).
 
 ## Supported books
 
@@ -258,6 +263,12 @@ range. Tombstones contain coordinates and timestamps, never annotation text.
 
 The root-only snapshot is removed only after KOReader's annotation persistence
 event succeeds; a failed event is replayed without duplicating annotations.
+That plugin-origin persistence event is not treated as a new user edit, so a
+native import does not immediately enqueue an outbound echo. On reader startup,
+pending native import is resolved before one converged outbound snapshot is
+captured; an invalid or failed pending import blocks the stale pre-import
+snapshot. The same guard covers suspend, close, manual sync, and recovered
+outboxes. Later user edits continue to schedule normal reconciliation.
 Annotation and note text never enter debug logs or dedupe receipts. The note
 baseline used to detect local edits remains private inside KOReader's existing
 annotation metadata.
@@ -307,7 +318,19 @@ See [Architecture](docs/architecture.md) and
 ## Troubleshooting
 
 Percentage synchronization is intentionally silent. Prefer **Show sync
-diagnostics**. These lower-level files remain available over SSH:
+diagnostics**. For a read-only SSH health report, run:
+
+```sh
+/mnt/us/koreader/plugins/goodreads.koplugin/bin/goodreads-doctor
+```
+
+Exit status `0` is healthy, `1` means warnings, and `2` means a hard error such
+as multiple independent KOReader roots or an invalid agent installation. The
+fixed-schema report contains only versions, booleans, and counts. It never
+launches a reader and never prints ASINs, filenames, process arguments,
+credentials, notes, highlights, or device identifiers.
+
+These lower-level files remain available over SSH:
 
 ```text
 /tmp/goodreads-progress-result.log
@@ -371,8 +394,8 @@ framework logs in public issues.
 - Native annotation synchronization requires an EPUB produced by the
   position-map-enabled Kindle converter; older cached conversions must be
   safely regenerated once.
-- Annotation synchronization is from KOReader to the native Kindle store. It
-  does not currently import native-only Kindle annotations into KOReader.
+- Native-to-KOReader annotation import remains experimental and requires an
+  exact active local KFX copy plus a compatible position map.
 - Progress is sent from KOReader to Goodreads; this plugin does not download a
   Goodreads percentage into KOReader.
 - Only ASIN-backed books are supported.

@@ -496,6 +496,85 @@ assert(#owned == 1 and owned[1].goodreads_native_provenance.highlight_created,
 assert(owned[1].goodreads_native_provenance.note_value == "native first",
     "native note baseline must stay private in KOReader metadata")
 
+local no_echo_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
+local no_echo_reader, no_echo_annotations = newImportReader()
+local no_echo_schedules = 0
+no_echo_plugin.ui = no_echo_reader
+no_echo_plugin.scheduleAnnotationReconcile = function()
+    no_echo_schedules = no_echo_schedules + 1
+end
+no_echo_reader.handleEvent = function(_, event)
+    no_echo_plugin:onAnnotationsModified(event.args)
+end
+assert(completeNativeSnapshot(no_echo_plugin, no_echo_reader, {
+    { id = 9, pos0 = "/no-echo.1", pos1 = "/no-echo.2", note = "native" },
+}))
+assert(#no_echo_annotations == 1, "native import must still persist the annotation")
+assert(no_echo_schedules == 0,
+    "native import persistence event must not schedule an outbound echo")
+no_echo_plugin:onAnnotationsModified({ no_echo_annotations[1] })
+assert(no_echo_schedules == 1,
+    "a later user annotation event must still schedule outbound reconciliation")
+
+local startup_flow_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
+local startup_flow_reader = newImportReader()
+startup_flow_plugin.ui = startup_flow_reader
+local startup_flow = {}
+startup_flow_plugin.scheduleAnnotationReconcile = function(_, trigger)
+    table.insert(startup_flow, trigger)
+end
+startup_flow_plugin.queueAnnotationReconcile = function(_, _, trigger)
+    table.insert(startup_flow, trigger)
+    return true, "queued"
+end
+startup_flow_plugin.queueNativeAnnotationImport = function(_, _, completion)
+    table.insert(startup_flow, "import_first")
+    completion(true)
+    completion(true) -- defensive duplicate completion must remain idempotent
+    return true, "queued", true
+end
+startup_flow_plugin:startReaderReadyAnnotationFlow(startup_flow_reader)
+assert(startup_flow[1] == "import_first"
+    and startup_flow[2] == "reader_ready_converged" and #startup_flow == 2,
+    "ReaderReady must import before capturing the converged outbound snapshot")
+
+startup_flow = {}
+startup_flow_plugin.queueNativeAnnotationImport = function()
+    return false, "no_snapshot", false
+end
+startup_flow_plugin:startReaderReadyAnnotationFlow(startup_flow_reader)
+assert(startup_flow[1] == "reader_ready_converged" and #startup_flow == 1,
+    "ReaderReady without a native snapshot must retain normal outbound sync")
+
+startup_flow = {}
+startup_flow_plugin.queueNativeAnnotationImport = function()
+    return false, "invalid native import metadata", true
+end
+startup_flow_plugin:startReaderReadyAnnotationFlow(startup_flow_reader)
+assert(#startup_flow == 0,
+    "invalid pending native snapshot must block a destructive pre-import outbound snapshot")
+
+local private_test_root = assert(os.getenv("GOODREADS_PRIVATE_STATE_DIR"))
+local pending_import_dir = private_test_root .. "/native-import"
+original_execute("mkdir -p " .. pending_import_dir)
+local pending_import_path = pending_import_dir .. "/B0FLB24198"
+local pending_import_file = assert(io.open(pending_import_path, "w"))
+pending_import_file:write("complete private snapshot fixture")
+pending_import_file:close()
+local stale_queue_plugin = newPlugin(settings({
+    annotation_sync_enabled = true,
+    native_annotation_import_enabled = true,
+}))
+local stale_queued, stale_detail = stale_queue_plugin:queueAnnotationSnapshot({
+    asin = "B0FLB24198",
+    trigger = "reader_ready",
+    desired = {},
+})
+assert(not stale_queued
+    and stale_detail == "native import must resolve before queued outbound snapshot",
+    "resumed stale outbox must not run while the same book has a pending native import")
+os.remove(pending_import_path)
+
 owned_reader.events = {}
 owned_reader.handleEvent = function(_, event) table.insert(owned_reader.events, event) end
 assert(completeNativeSnapshot(owned_plugin, owned_reader, {

@@ -33,5 +33,6 @@ PROJECT_ROOT="$project_root" \
     "$lua_runtime" "$project_root/tests/test_main.lua"
 
 "$project_root/tests/test_lifecycle_stress.sh"
+"$project_root/tests/test_doctor.sh" --stress
 
-printf '%s\n' 'Release stress gate passed: annotation, lifecycle, concurrency, and process-selection stress.'
+printf '%s\n' 'Release stress gate passed: annotation, lifecycle, doctor, concurrency, and process-selection stress.'
