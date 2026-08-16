@@ -16,7 +16,7 @@ import java.util.Map;
 import java.util.Properties;
 import testsupport.Fakes;
 
-public final class GoodreadsAnnotationAgentV28Test {
+public final class GoodreadsAnnotationAgentV29Test {
     private static final String ASIN = "B0FLB24198";
     private static final String START = "AAAAAAAAAAAA";
     private static final String END = "AAAAAAAAAAAB";
@@ -29,7 +29,7 @@ public final class GoodreadsAnnotationAgentV28Test {
     private static final String TERMINAL_END_NORMALIZED = "ATwFAAD3AgAA";
     private static int requestSequence = 10000000;
 
-    private GoodreadsAnnotationAgentV28Test() {}
+    private GoodreadsAnnotationAgentV29Test() {}
 
     public static void main(String[] ignored) throws Exception {
         verifyExactRangeIdentityParsing();
@@ -241,7 +241,7 @@ public final class GoodreadsAnnotationAgentV28Test {
         addDesired(payload, 0, START, 100, END, 200, "");
         addDesired(payload, 1, START, 100, END, 200, "retained note");
         addDesired(payload, 2, START, 101, END, 201, "nearby note");
-        Method reader = GoodreadsAnnotationAgentV28.class.getDeclaredMethod(
+        Method reader = GoodreadsAnnotationAgentV29.class.getDeclaredMethod(
             "readRecords", Properties.class, String.class);
         reader.setAccessible(true);
         List<?> records = (List<?>) reader.invoke(null, payload, "desired");
@@ -321,7 +321,7 @@ public final class GoodreadsAnnotationAgentV28Test {
         Path result = Paths.get("/tmp/goodreads-annotation-result-" + requestId + ".log");
         Files.write(path, payload, StandardCharsets.ISO_8859_1);
         Files.deleteIfExists(result);
-        GoodreadsAnnotationAgentV28.agentmain(path.toString(), null);
+        GoodreadsAnnotationAgentV29.agentmain(path.toString(), null);
         expect(false, Files.exists(path), "agent must remove payload after loading it");
         Map<String, String> fields = readResult(result);
         Files.deleteIfExists(result);

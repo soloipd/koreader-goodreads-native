@@ -5,7 +5,7 @@ set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 plugin_dir="$project_root/goodreads.koplugin"
 agent_jar="$plugin_dir/bin/goodreads-progress-agent-v2.jar"
-annotation_agent_jar="$plugin_dir/bin/goodreads-annotation-agent-v28.jar"
+annotation_agent_jar="$plugin_dir/bin/goodreads-annotation-agent-v29.jar"
 annotation_export_jar="$plugin_dir/bin/goodreads-annotation-export-agent-v3.jar"
 
 sh -n "$plugin_dir/bin/sync-progress"
@@ -101,7 +101,7 @@ grep -Fq "grep -Eq '^legacy_journaled=(true|unavailable)$'" "$plugin_dir/bin/syn
     || { printf 'error: legacy journaling status is not validated\n' >&2; exit 1; }
 grep -Fq "grep -Eq '^cloud_snapshot_synced=(true|unavailable)$'" "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: firmware-specific snapshot status is not validated\n' >&2; exit 1; }
-grep -Fq "grep -Eq '^agent_generation=(18|19|20|21|22|23|24|25|26|27|28)$'" "$plugin_dir/bin/sync-annotations" \
+grep -Fq "grep -Eq '^agent_generation=(18|19|20|21|22|23|24|25|26|27|28|29)$'" "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: completed legacy migration is not preserved across agent upgrades\n' >&2; exit 1; }
 grep -Fq 'failed_stage=wait_for_active_book' "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: inactive native-book requests are not queued for replay\n' >&2; exit 1; }
@@ -207,14 +207,16 @@ grep -Fqx 'GoodreadsProgressAgentV2.class' <<<"$progress_entries" \
     || { printf 'error: agent JAR lacks its main class\n' >&2; exit 1; }
 grep -Fqx 'GoodreadsProgressAgentV2$RequestArguments.class' <<<"$progress_entries" \
     || { printf 'error: agent JAR lacks its argument parser class\n' >&2; exit 1; }
-grep -Fqx 'Agent-Class: GoodreadsAnnotationAgentV28' <<<"$annotation_manifest" \
+grep -Fqx 'Agent-Class: GoodreadsAnnotationAgentV29' <<<"$annotation_manifest" \
     || { printf 'error: annotation agent manifest is invalid\n' >&2; exit 1; }
-grep -Fqx 'GoodreadsAnnotationAgentV28.class' <<<"$annotation_entries" \
+grep -Fqx 'GoodreadsAnnotationAgentV29.class' <<<"$annotation_entries" \
     || { printf 'error: annotation agent JAR lacks its main class\n' >&2; exit 1; }
-grep -Fqx 'GoodreadsAnnotationAgentV28$CloudAnnotationHandler.class' <<<"$annotation_entries" \
+grep -Fqx 'GoodreadsAnnotationAgentV29$CloudAnnotationHandler.class' <<<"$annotation_entries" \
     || { printf 'error: annotation agent JAR lacks its cloud proxy handler\n' >&2; exit 1; }
-grep -Fqx 'GoodreadsAnnotationAgentV28$RangeIdentity.class' <<<"$annotation_entries" \
+grep -Fqx 'GoodreadsAnnotationAgentV29$RangeIdentity.class' <<<"$annotation_entries" \
     || { printf 'error: annotation agent JAR lacks exact range identities\n' >&2; exit 1; }
+grep -Fqx 'GoodreadsAnnotationAgentV29$1.class' <<<"$annotation_entries" \
+    || { printf 'error: annotation agent JAR lacks its compiler-generated access class\n' >&2; exit 1; }
 grep -Fqx 'Agent-Class: GoodreadsAnnotationExportAgentV3' <<<"$annotation_export_manifest" \
     || { printf 'error: annotation export agent manifest is invalid\n' >&2; exit 1; }
 grep -Fqx 'GoodreadsAnnotationExportAgentV3.class' <<<"$annotation_export_entries" \
@@ -235,10 +237,39 @@ if command -v "$javac_bin" >/dev/null 2>&1 && command -v "$java_bin" >/dev/null 
     mkdir -p "$annotation_test_dir"
     "$javac_bin" --release 8 -Xlint:-options -d "$annotation_test_dir" \
         "$project_root/agent/src/GoodreadsAnnotationAgentV3.java" \
-        "$project_root/agent/src/GoodreadsAnnotationAgentV28.java" \
+        "$project_root/agent/src/GoodreadsAnnotationAgentV29.java" \
         "$project_root/agent/src/GoodreadsAnnotationExportAgentV3.java" \
         "${annotation_test_sources[@]}"
-    "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationAgentV28Test
+    while IFS= read -r class_file; do
+        packaged_class="$annotation_test_dir/$class_file.packaged"
+        unzip -p "$annotation_agent_jar" "$class_file" >"$packaged_class"
+        cmp -s "$annotation_test_dir/$class_file" "$packaged_class" || {
+            printf 'error: packaged annotation agent bytecode is stale: %s\n' \
+                "$class_file" >&2
+            exit 1
+        }
+        rm -f "$packaged_class"
+    done < <(printf '%s\n' \
+        'GoodreadsAnnotationAgentV29.class' \
+        'GoodreadsAnnotationAgentV29$1.class' \
+        'GoodreadsAnnotationAgentV29$CloudAnnotationHandler.class' \
+        'GoodreadsAnnotationAgentV29$Record.class' \
+        'GoodreadsAnnotationAgentV29$RangeEndpoint.class' \
+        'GoodreadsAnnotationAgentV29$RangeIdentity.class' \
+        'GoodreadsAnnotationAgentV29$Counters.class')
+    while IFS= read -r class_file; do
+        packaged_class="$annotation_test_dir/$class_file.packaged"
+        unzip -p "$annotation_export_jar" "$class_file" >"$packaged_class"
+        cmp -s "$annotation_test_dir/$class_file" "$packaged_class" || {
+            printf 'error: packaged annotation export bytecode is stale: %s\n' \
+                "$class_file" >&2
+            exit 1
+        }
+        rm -f "$packaged_class"
+    done < <(printf '%s\n' \
+        'GoodreadsAnnotationExportAgentV3.class' \
+        'GoodreadsAnnotationExportAgentV3$ExportRecord.class')
+    "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationAgentV29Test
     "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationExportAgentV3Test
 else
     printf 'warning: Java toolchain unavailable; annotation agent behavior tests were skipped\n' >&2
