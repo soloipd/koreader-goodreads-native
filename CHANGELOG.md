@@ -3,6 +3,23 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-08-16
+
+### Added
+
+- Opt-in experimental import of native Kindle highlights and notes into the
+  matching converted KOReader book.
+- A read-only framework exporter, low-power native-reader watcher, root-only
+  durable handoff, and detached reverse translation through
+  `kindle.koplugin` v0.0.7.
+
+### Safety
+
+- Import is additive: missing ranges are created and empty notes may be filled.
+  Existing non-empty KOReader notes are never overwritten.
+- Native deletions do not delete KOReader annotations in this release, and
+  snapshots are acknowledged only after KOReader's persistence event.
+
 ## [0.6.2] - 2026-08-16
 
 ### Fixed

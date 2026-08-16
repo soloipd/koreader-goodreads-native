@@ -12,6 +12,7 @@ local _ = require("gettext")
 local logger = require("logger")
 local json = require("json")
 local util = require("util")
+local Event = require("ui/event")
 local AnnotationOutbox = require("annotationoutbox")
 
 local LIPC_HASH_TOOL = "/usr/bin/lipc-hash-prop"
@@ -35,6 +36,9 @@ local PRIVATE_STATE_DIR = os.getenv("GOODREADS_PRIVATE_STATE_DIR")
     or "/var/local/koreader-goodreads-native"
 local ANNOTATION_PENDING_DIR = PRIVATE_STATE_DIR .. "/annotation-pending"
 local ANNOTATION_OUTBOX_DIR = PRIVATE_STATE_DIR .. "/annotation-outbox"
+local NATIVE_IMPORT_DIR = PRIVATE_STATE_DIR .. "/native-import"
+local NATIVE_IMPORT_ENABLED_FILE = PRIVATE_STATE_DIR .. "/native-import-enabled"
+local NATIVE_IMPORT_WATCHER = "/mnt/us/koreader/plugins/goodreads.koplugin/bin/watch-native-annotations"
 local ANNOTATION_SEQUENCE_DIR = PRIVATE_STATE_DIR .. "/annotation-sequences"
 local SHA256_TOOL = os.getenv("GOODREADS_SHA256_TOOL") or "/usr/bin/sha256sum"
 local RATING_HELPER = "/mnt/us/koreader/plugins/goodreads.koplugin/bin/sync-rating"
@@ -176,6 +180,17 @@ local outbox_resume_scheduled = false
 
 local function isAsin(value)
     return type(value) == "string" and value:match("^B[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]$") ~= nil
+end
+
+local function hexDecode(value, maximum)
+    if type(value) ~= "string" or #value % 2 ~= 0 or #value > maximum * 2
+        or value:find("[^0-9a-f]")
+    then
+        return nil
+    end
+    return (value:gsub("..", function(pair)
+        return string.char(tonumber(pair, 16))
+    end))
 end
 
 local function extractAsin(path)
@@ -1282,6 +1297,209 @@ function Goodreads:pollAnnotationResult(snapshot)
     UIManager:scheduleIn(1, poll)
 end
 
+local function readNativeImportSnapshot(asin)
+    local path = NATIVE_IMPORT_DIR .. "/" .. asin
+    local content = readWholeFile(path, 512 * 1024)
+    if not content then return nil, "native import snapshot unavailable" end
+    local fields = {}
+    for line in content:gmatch("[^\r\n]+") do
+        local key, value = line:match("^([%w_%.]+)=(.*)$")
+        if not key or fields[key] ~= nil then return nil, "invalid native import snapshot" end
+        fields[key] = value
+    end
+    local count = tonumber(fields.count)
+    local native_path = hexDecode(fields.native_path_hex, 4096)
+    if fields.version ~= "1" or fields.success ~= "true" or fields.asin ~= asin
+        or not count or count < 0 or count > 1000 or count ~= math.floor(count)
+        or not native_path or not native_path:match("^/mnt/us/documents/")
+        or type(fields.request_id) ~= "string" or not fields.request_id:match("^%d+$")
+    then
+        return nil, "invalid native import metadata"
+    end
+    local allowed = {
+        version = true, success = true, asin = true, request_id = true,
+        native_path_hex = true, count = true,
+    }
+    local items, note_bytes = {}, 0
+    for index = 0, count - 1 do
+        local base = "item." .. index .. "."
+        local start_long, end_long = fields[base .. "start"], fields[base .. "end"]
+        local start_short, end_short = tonumber(fields[base .. "start_short"]),
+            tonumber(fields[base .. "end_short"])
+        local note = hexDecode(fields[base .. "note_hex"], 65536)
+        allowed[base .. "start"], allowed[base .. "start_short"] = true, true
+        allowed[base .. "end"], allowed[base .. "end_short"] = true, true
+        allowed[base .. "note_hex"] = true
+        if type(start_long) ~= "string" or not start_long:match("^A[%w%+/]+$")
+            or #start_long ~= 12 or type(end_long) ~= "string"
+            or not end_long:match("^A[%w%+/]+$") or #end_long ~= 12
+            or not start_short or start_short < 0 or start_short > 2147483647
+            or start_short ~= math.floor(start_short)
+            or not end_short or end_short < 0 or end_short > 2147483647
+            or end_short ~= math.floor(end_short)
+            or not note
+        then
+            return nil, "invalid native import range"
+        end
+        note_bytes = note_bytes + #note
+        if note_bytes > 200 * 1024 then return nil, "native import notes exceed limit" end
+        table.insert(items, { start_long = start_long, end_long = end_long, note = note })
+    end
+    for key in pairs(fields) do
+        if not allowed[key] then return nil, "unexpected native import field" end
+    end
+    return { path = path, native_path = native_path, items = items }
+end
+
+function Goodreads:startNativeAnnotationWatcher()
+    if not isReadable(NATIVE_IMPORT_WATCHER) then return false end
+    os.execute("mkdir -p " .. util.shell_escape({ PRIVATE_STATE_DIR })
+        .. " && chmod 700 " .. util.shell_escape({ PRIVATE_STATE_DIR })
+        .. " && umask 077 && : > " .. util.shell_escape({ NATIVE_IMPORT_ENABLED_FILE }))
+    os.execute("(" .. util.shell_escape({ NATIVE_IMPORT_WATCHER }) .. ") >/dev/null 2>&1 &")
+    return true
+end
+
+function Goodreads:applyNativeAnnotationImport(reader, snapshot, positions)
+    local existing = {}
+    for _, item in ipairs(reader.annotation and reader.annotation.annotations or {}) do
+        if item.drawer and type(item.pos0) == "string" and type(item.pos1) == "string" then
+            local first = item.pos0 < item.pos1 and item.pos0 or item.pos1
+            local second = item.pos0 < item.pos1 and item.pos1 or item.pos0
+            existing[first .. "\0" .. second] = item
+        end
+    end
+    local modified, added, notes_added = {}, 0, 0
+    for index, imported in ipairs(snapshot.items) do
+        local translated = positions[index]
+        local pos0, pos1 = translated.start.xpointer, translated["end"].xpointer
+        local first = pos0 < pos1 and pos0 or pos1
+        local second = pos0 < pos1 and pos1 or pos0
+        local key = first .. "\0" .. second
+        local current = existing[key]
+        if current then
+            if imported.note ~= "" and (current.note == nil or current.note == "") then
+                current.note = imported.note
+                current.goodreads_native_import = true
+                table.insert(modified, current)
+                notes_added = notes_added + 1
+            end
+        else
+            local ok_text, text = pcall(reader.document.getTextFromXPointers,
+                reader.document, pos0, pos1)
+            local chapter
+            if reader.toc and type(reader.toc.getTocTitleByPage) == "function" then
+                local ok_chapter, value = pcall(reader.toc.getTocTitleByPage,
+                    reader.toc, pos0)
+                if ok_chapter and value ~= "" then chapter = value end
+            end
+            local item = {
+                page = pos0,
+                pos0 = pos0,
+                pos1 = pos1,
+                text = ok_text and text or "",
+                drawer = reader.view and reader.view.highlight
+                    and reader.view.highlight.saved_drawer or "lighten",
+                note = imported.note ~= "" and imported.note or nil,
+                chapter = chapter,
+                goodreads_native_import = true,
+            }
+            reader.annotation:addItem(item)
+            existing[key] = item
+            table.insert(modified, item)
+            added = added + 1
+            if item.note then notes_added = notes_added + 1 end
+        end
+    end
+    if #modified > 0 then
+        modified.nb_highlights_added = added
+        modified.nb_notes_added = notes_added
+        local ok_event = pcall(reader.handleEvent, reader,
+            Event:new("AnnotationsModified", modified))
+        if not ok_event then return false, "KOReader annotation event failed" end
+    end
+    os.remove(snapshot.path)
+    self:debugLog("native_annotations_imported", {
+        trigger = "native_import",
+        annotations = added,
+        notes = notes_added,
+        status = #modified > 0 and "merged" or "already_current",
+    })
+    return true
+end
+
+function Goodreads:queueNativeAnnotationImport(reader)
+    if not self.settings.native_annotation_import_enabled or self.native_import_inflight then
+        return false
+    end
+    local asin = getBookAsin(reader)
+    local epub_path, native_path = getAnnotationBookPaths(reader)
+    if not asin or not epub_path or not native_path then return false end
+    local snapshot = readNativeImportSnapshot(asin)
+    if not snapshot or snapshot.native_path ~= native_path then return false end
+    local helper
+    for _, candidate in ipairs(KINDLE_HELPER_PATHS) do
+        if isReadable(candidate) then helper = candidate break end
+    end
+    if not helper then return false end
+    local request_id = string.format("%d%d", os.time(), math.random(1000, 9999))
+    local base = "/tmp/goodreads-native-import-" .. request_id
+    local request_path, temp_path, result_path, failed_path =
+        base .. ".request", base .. ".tmp", base .. ".json", base .. ".failed"
+    local requests = {}
+    for _, item in ipairs(snapshot.items) do
+        table.insert(requests, { start = item.start_long, ["end"] = item.end_long })
+    end
+    local request = openPrivateFile(request_path)
+    if not request then return false end
+    request:write(json.encode(requests))
+    request:close()
+    os.execute("chmod 600 " .. util.shell_escape({ request_path }))
+    local command = string.format(
+        "(umask 077; if %s > %s 2>/dev/null; then mv -f %s %s; else : > %s; fi; rm -f %s) >/dev/null 2>&1 &",
+        util.shell_escape({ helper, "translate-native-positions", "--epub", epub_path,
+            "--request", request_path }),
+        util.shell_escape({ temp_path }), util.shell_escape({ temp_path }),
+        util.shell_escape({ result_path }), util.shell_escape({ failed_path }),
+        util.shell_escape({ request_path }))
+    if os.execute(command) ~= 0 then os.remove(request_path); return false end
+    self.native_import_inflight = true
+    local attempts = 0
+    local function cleanup()
+        for _, path in ipairs({ request_path, temp_path, result_path, failed_path }) do os.remove(path) end
+        self.native_import_inflight = false
+    end
+    local function poll()
+        attempts = attempts + 1
+        if isReadable(failed_path) then cleanup(); return end
+        local output = readWholeFile(result_path, 1024 * 1024)
+        if output then
+            local ok, result = pcall(json.decode, output)
+            if ok and result and result.ok and type(result.positions) == "table"
+                and #result.positions == #snapshot.items
+            then
+                for _, position in ipairs(result.positions) do
+                    if type(position.start) ~= "table" or type(position.start.xpointer) ~= "string"
+                        or type(position["end"]) ~= "table"
+                        or type(position["end"].xpointer) ~= "string"
+                        or #position.start.xpointer > 65536
+                        or #position["end"].xpointer > 65536
+                        or position.start.xpointer:sub(1, 1) ~= "/"
+                        or position["end"].xpointer:sub(1, 1) ~= "/"
+                    then cleanup(); return end
+                end
+                cleanup()
+                self:applyNativeAnnotationImport(reader, snapshot, result.positions)
+                return
+            end
+            cleanup(); return
+        end
+        if attempts < 120 then UIManager:scheduleIn(1, poll) else cleanup() end
+    end
+    UIManager:scheduleIn(1, poll)
+    return true
+end
+
 function Goodreads:scheduleAnnotationReconcile(trigger)
     self.annotation_sync_generation = (self.annotation_sync_generation or 0) + 1
     local generation = self.annotation_sync_generation
@@ -1347,6 +1565,9 @@ function Goodreads:init()
     if self.settings.annotation_sync_enabled == nil then
         self.settings.annotation_sync_enabled = true
     end
+    if self.settings.native_annotation_import_enabled == nil then
+        self.settings.native_annotation_import_enabled = false
+    end
     if type(self.settings.rating_prompted) ~= "table" then
         self.settings.rating_prompted = {}
     end
@@ -1370,6 +1591,7 @@ function Goodreads:init()
     self.annotation_sync_inflight = nil
     self.annotation_pending_snapshots = {}
     self.annotation_pending_order = {}
+    self.native_import_inflight = false
     self.ui.menu:registerToMainMenu(self)
     self:applyReaderHook()
     if not outbox_resume_scheduled then
@@ -1377,6 +1599,9 @@ function Goodreads:init()
         UIManager:scheduleIn(0, function()
             self:resumeAnnotationOutbox()
         end)
+    end
+    if self.settings.native_annotation_import_enabled then
+        self:startNativeAnnotationWatcher()
     end
 end
 
@@ -1614,6 +1839,9 @@ end
 function Goodreads:onReaderReady()
     self:scheduleProgressTimer()
     self:scheduleAnnotationReconcile("reader_ready")
+    UIManager:scheduleIn(0.5, function()
+        if self.ui and self.ui.document then self:queueNativeAnnotationImport(self.ui) end
+    end)
     UIManager:scheduleIn(3, function()
         if self.ui and self.ui.document and self.settings.periodic_progress_enabled then
             self:syncReaderCheckpoint(self.ui, "reader_ready")
@@ -1639,6 +1867,7 @@ end
 function Goodreads:onResume()
     UIManager:scheduleIn(3, function()
         if self.ui and self.ui.document then
+            self:queueNativeAnnotationImport(self.ui)
             self:syncReaderCheckpoint(self.ui, "resume")
             self:scheduleProgressTimer()
         end
@@ -1936,6 +2165,7 @@ function Goodreads:rateCurrentBook()
         }))
         return
     end
+
     self:showRatingDialog(asin)
 end
 
@@ -2137,6 +2367,8 @@ function Goodreads:syncCurrentBook()
         }))
         return
     end
+
+    self:queueNativeAnnotationImport(reader)
 
     if not action then
         UIManager:show(InfoMessage:new({
@@ -2618,6 +2850,25 @@ function Goodreads:addToMainMenu(menu_items)
                 end,
             },
             {
+                text = _("Import native Kindle highlights (experimental)"),
+                checked_func = function()
+                    return self.settings.native_annotation_import_enabled == true
+                end,
+                callback = function()
+                    self.settings.native_annotation_import_enabled =
+                        not self.settings.native_annotation_import_enabled
+                    self:saveSettings()
+                    if self.settings.native_annotation_import_enabled then
+                        self:startNativeAnnotationWatcher()
+                        if self.ui and self.ui.document then
+                            self:queueNativeAnnotationImport(self.ui)
+                        end
+                    else
+                        os.remove(NATIVE_IMPORT_ENABLED_FILE)
+                    end
+                end,
+            },
+            {
                 text = _("Rate current book…"),
                 callback = function()
                     self:rateCurrentBook()
@@ -2645,6 +2896,7 @@ function Goodreads:addToMainMenu(menu_items)
                 end,
                 callback = function()
                     local ok, detail = self:queueAnnotationReconcile(self.ui, "manual")
+                    self:queueNativeAnnotationImport(self.ui)
                     UIManager:show(InfoMessage:new({
                         text = ok and _("Annotation sync queued.") or tostring(detail),
                         timeout = 4,

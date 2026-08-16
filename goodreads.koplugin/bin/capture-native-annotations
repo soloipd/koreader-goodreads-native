@@ -1,0 +1,44 @@
+#!/bin/sh
+
+# Capture the active local Kindle book into the private native-import inbox.
+set -u
+
+PLUGIN_DIR="${GOODREADS_PLUGIN_DIR:-/mnt/us/koreader/plugins/goodreads.koplugin}"
+PRIVATE_STATE_DIR="${GOODREADS_PRIVATE_STATE_DIR:-/var/local/koreader-goodreads-native}"
+INBOX_DIR="$PRIVATE_STATE_DIR/native-import"
+TMP_ROOT="${GOODREADS_TMP_DIR:-/tmp}"
+EXPORT_HELPER="$PLUGIN_DIR/bin/export-native-annotations"
+request_id="$(date +%s)$$"
+payload="$TMP_ROOT/goodreads-native-export-$request_id.properties"
+result="$TMP_ROOT/goodreads-native-export-$request_id.result"
+temp=""
+
+cleanup() {
+    rm -f "$payload" "$result"
+    [ -z "$temp" ] || rm -f "$temp"
+}
+trap cleanup EXIT HUP INT TERM
+
+umask 077
+printf '%s\n' 'version=1' 'mode=active_snapshot' "request_id=$request_id" >"$payload" \
+    || exit 4
+chmod 0600 "$payload"
+"$EXPORT_HELPER" "$payload" >/dev/null 2>&1 || exit $?
+
+asin="$(sed -n 's/^asin=//p' "$result" | sed -n '1p')"
+native_path_hex="$(sed -n 's/^native_path_hex=//p' "$result" | sed -n '1p')"
+count="$(sed -n 's/^count=//p' "$result" | sed -n '1p')"
+printf '%s\n' "$asin" | grep -Eq '^B[A-Z0-9]{9}$' || exit 5
+case "$native_path_hex" in ''|*[!0-9a-f]*) exit 5 ;; esac
+[ $(( ${#native_path_hex} % 2 )) -eq 0 ] || exit 5
+case "$count" in ''|*[!0-9]*) exit 5 ;; esac
+[ "$count" -le 1000 ] || exit 5
+grep -Fqx 'success=true' "$result" || exit 5
+
+mkdir -p "$INBOX_DIR" || exit 6
+chmod 0700 "$PRIVATE_STATE_DIR" "$INBOX_DIR" 2>/dev/null || true
+temp="$INBOX_DIR/$asin.$$"
+cp "$result" "$temp" && chmod 0600 "$temp" && mv -f "$temp" "$INBOX_DIR/$asin" \
+    || exit 6
+temp=""
+exit 0

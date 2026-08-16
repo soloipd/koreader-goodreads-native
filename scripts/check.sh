@@ -6,15 +6,22 @@ project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 plugin_dir="$project_root/goodreads.koplugin"
 agent_jar="$plugin_dir/bin/goodreads-progress-agent-v2.jar"
 annotation_agent_jar="$plugin_dir/bin/goodreads-annotation-agent-v27.jar"
+annotation_export_jar="$plugin_dir/bin/goodreads-annotation-export-agent-v1.jar"
 
 sh -n "$plugin_dir/bin/sync-progress"
 sh -n "$plugin_dir/bin/sync-rating"
 sh -n "$plugin_dir/bin/sync-annotations"
+sh -n "$plugin_dir/bin/export-native-annotations"
+sh -n "$plugin_dir/bin/capture-native-annotations"
+sh -n "$plugin_dir/bin/watch-native-annotations"
 sh -n "$plugin_dir/bin/watch-pending-annotations"
 sh -n "$plugin_dir/bin/manage-sync-receipts"
 sh -n "$plugin_dir/bin/acknowledge-annotation-outbox"
 test -x "$plugin_dir/bin/manage-sync-receipts"
 test -x "$plugin_dir/bin/acknowledge-annotation-outbox"
+test -x "$plugin_dir/bin/export-native-annotations"
+test -x "$plugin_dir/bin/capture-native-annotations"
+test -x "$plugin_dir/bin/watch-native-annotations"
 cmp -s "$project_root/VERSION" "$plugin_dir/VERSION" \
     || { printf 'error: packaged plugin version does not match release version\n' >&2; exit 1; }
 grep -Fq 'write_receipt saved_locally' "$plugin_dir/bin/sync-annotations" \
@@ -36,6 +43,17 @@ if sed -n '/function Goodreads:startAnnotationReconcile/,/function Goodreads:res
     printf 'error: annotation position translation still blocks the KOReader UI thread\n' >&2
     exit 1
 fi
+grep -Fq 'translate-native-positions' "$plugin_dir/main.lua" \
+    || { printf 'error: native annotation import lacks batch reverse translation\n' >&2; exit 1; }
+if sed -n '/function Goodreads:queueNativeAnnotationImport/,/function Goodreads:scheduleAnnotationReconcile/p' \
+    "$plugin_dir/main.lua" | grep -Fq 'io.popen'; then
+    printf 'error: native annotation import blocks the KOReader UI thread\n' >&2
+    exit 1
+fi
+grep -Fq 'com.lab126.appmgrd appStarted' "$plugin_dir/bin/watch-native-annotations" \
+    || { printf 'error: native import watcher does not observe native-reader starts\n' >&2; exit 1; }
+grep -Fq 'native-import-enabled' "$plugin_dir/bin/watch-native-annotations" \
+    || { printf 'error: native import watcher ignores the opt-in setting\n' >&2; exit 1; }
 grep -Fq 'result.outbox_acknowledged == "true"' "$plugin_dir/main.lua" \
     || { printf 'error: annotation success does not require outbox acknowledgement\n' >&2; exit 1; }
 grep -Fq 'failed_stage=outbox_superseded' "$plugin_dir/bin/sync-annotations" \
@@ -149,13 +167,17 @@ fi
 
 test -s "$agent_jar"
 test -s "$annotation_agent_jar"
+test -s "$annotation_export_jar"
 test -s "$plugin_dir/bin/classes/AttachLauncher.class"
 unzip -tq "$agent_jar"
 unzip -tq "$annotation_agent_jar"
+unzip -tq "$annotation_export_jar"
 progress_manifest="$(unzip -p "$agent_jar" META-INF/MANIFEST.MF | tr -d '\r')"
 annotation_manifest="$(unzip -p "$annotation_agent_jar" META-INF/MANIFEST.MF | tr -d '\r')"
+annotation_export_manifest="$(unzip -p "$annotation_export_jar" META-INF/MANIFEST.MF | tr -d '\r')"
 progress_entries="$(unzip -Z1 "$agent_jar")"
 annotation_entries="$(unzip -Z1 "$annotation_agent_jar")"
+annotation_export_entries="$(unzip -Z1 "$annotation_export_jar")"
 annotation_agent_count="$(find "$plugin_dir/bin" -maxdepth 1 -type f \
     -name 'goodreads-annotation-agent-v*.jar' | wc -l | tr -d '[:space:]')"
 
@@ -174,6 +196,10 @@ grep -Fqx 'GoodreadsAnnotationAgentV27.class' <<<"$annotation_entries" \
     || { printf 'error: annotation agent JAR lacks its main class\n' >&2; exit 1; }
 grep -Fqx 'GoodreadsAnnotationAgentV27$CloudAnnotationHandler.class' <<<"$annotation_entries" \
     || { printf 'error: annotation agent JAR lacks its cloud proxy handler\n' >&2; exit 1; }
+grep -Fqx 'Agent-Class: GoodreadsAnnotationExportAgentV1' <<<"$annotation_export_manifest" \
+    || { printf 'error: annotation export agent manifest is invalid\n' >&2; exit 1; }
+grep -Fqx 'GoodreadsAnnotationExportAgentV1.class' <<<"$annotation_export_entries" \
+    || { printf 'error: annotation export agent JAR lacks its main class\n' >&2; exit 1; }
 
 javac_bin="${JAVAC:-javac}"
 java_bin="${JAVA:-java}"
@@ -189,8 +215,10 @@ if command -v "$javac_bin" >/dev/null 2>&1 && command -v "$java_bin" >/dev/null 
     "$javac_bin" --release 8 -Xlint:-options -d "$annotation_test_dir" \
         "$project_root/agent/src/GoodreadsAnnotationAgentV3.java" \
         "$project_root/agent/src/GoodreadsAnnotationAgentV27.java" \
+        "$project_root/agent/src/GoodreadsAnnotationExportAgentV1.java" \
         "${annotation_test_sources[@]}"
     "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationAgentV27Test
+    "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationExportAgentV1Test
 else
     printf 'warning: Java toolchain unavailable; annotation agent behavior tests were skipped\n' >&2
 fi

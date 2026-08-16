@@ -181,4 +181,32 @@ if GOODREADS_PLUGIN_DIR="$plugin_dir" GOODREADS_SETTINGS_DIR="$settings_dir" \
     exit 1
 fi
 
+# Native-reader capture must atomically retain the newest private snapshot and
+# remove all transient request/result files. The fake exporter performs no
+# native mutation and returns one coordinate-only range plus a private note.
+import_plugin="$test_root/import-plugin"
+import_private="$test_root/import-private"
+import_tmp="$test_root/import-tmp"
+mkdir -p "$import_plugin/bin" "$import_private" "$import_tmp"
+cat >"$import_plugin/bin/export-native-annotations" <<'EOF'
+#!/bin/sh
+payload="$1"
+request_id="$(sed -n 's/^request_id=//p' "$payload" | sed -n '1p')"
+result="${GOODREADS_TMP_DIR:-/tmp}/goodreads-native-export-$request_id.result"
+printf '%s\n' version=1 "request_id=$request_id" asin=B012345678 \
+    native_path_hex=2f6d6e742f75732f646f63756d656e74732f546573742e6b6678 count=1 \
+    item.0.start=AAAAAAAAAAAA item.0.start_short=1 \
+    item.0.end=AAAAAAAAAAAB item.0.end_short=2 \
+    item.0.note_hex=70726976617465 success=true >"$result"
+rm -f "$payload"
+EOF
+chmod 0755 "$import_plugin/bin/export-native-annotations"
+GOODREADS_PLUGIN_DIR="$import_plugin" GOODREADS_PRIVATE_STATE_DIR="$import_private" \
+    GOODREADS_TMP_DIR="$import_tmp" \
+    "$project_root/goodreads.koplugin/bin/capture-native-annotations"
+test -s "$import_private/native-import/$asin"
+grep -Fqx 'success=true' "$import_private/native-import/$asin"
+grep -Fqx 'item.0.note_hex=70726976617465' "$import_private/native-import/$asin"
+test "$(find "$import_tmp" -type f | wc -l | tr -d '[:space:]')" = 0
+
 printf 'Sync receipt tests passed.\n'

@@ -1,0 +1,27 @@
+#!/bin/sh
+
+# Low-power watcher that snapshots annotations while Kindle owns the book.
+set -u
+
+PLUGIN_DIR="${GOODREADS_PLUGIN_DIR:-/mnt/us/koreader/plugins/goodreads.koplugin}"
+CAPTURE="$PLUGIN_DIR/bin/capture-native-annotations"
+PRIVATE_STATE_DIR="${GOODREADS_PRIVATE_STATE_DIR:-/var/local/koreader-goodreads-native}"
+ENABLE_FILE="$PRIVATE_STATE_DIR/native-import-enabled"
+LOCK_ROOT="${GOODREADS_LOCK_DIR:-/tmp}"
+WATCH_LOCK="$LOCK_ROOT/goodreads-native-import-watcher.lock"
+LIPC_WAIT_EVENT="${GOODREADS_LIPC_WAIT_EVENT:-/usr/bin/lipc-wait-event}"
+
+if ! mkdir "$WATCH_LOCK" 2>/dev/null; then
+    exit 0
+fi
+trap 'rmdir "$WATCH_LOCK" 2>/dev/null || true' EXIT HUP INT TERM
+[ -f "$ENABLE_FILE" ] || exit 0
+
+# Capture an already-active native reader before waiting for the next event.
+"$CAPTURE" >/dev/null 2>&1 || true
+while "$LIPC_WAIT_EVENT" com.lab126.appmgrd appStarted >/dev/null 2>&1; do
+    [ -f "$ENABLE_FILE" ] || exit 0
+    sleep 2
+    "$CAPTURE" >/dev/null 2>&1 || true
+done
+exit 0
