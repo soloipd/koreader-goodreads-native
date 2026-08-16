@@ -32,6 +32,9 @@ All notable changes to this project are documented here. The project follows
 - Annotation handoff repairs a stale `kindle.koplugin` source path from
   Kindle's current content catalog. Only one readable, visible, non-archived,
   fully local ebook row is accepted; ambiguous catalog results fail closed.
+- Pre-upgrade durable annotation outboxes are revalidated before crash
+  recovery. A uniquely moved native book is rewritten atomically at a newer
+  sequence; stale or ambiguous paths remain pending and are never executed.
 
 ## [0.8.0] - 2026-08-16
 

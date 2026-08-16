@@ -774,6 +774,33 @@ local function getAnnotationBookPaths(reader, asin)
     return epub_path, native_path
 end
 
+local function refreshResumedAnnotationSnapshot(snapshot)
+    if type(snapshot) ~= "table" or not isAsin(snapshot.asin) then
+        return false, "invalid resumed snapshot"
+    end
+    local catalog_path, catalog_status =
+        resolveNativeBookPathFromCatalog(snapshot.asin)
+    if catalog_path then
+        if catalog_path == snapshot.native_path then return true end
+        snapshot.native_path = catalog_path
+        local persisted, detail = persistAnnotationOutbox(snapshot)
+        if not persisted then
+            return false, detail or "cannot persist repaired outbox"
+        end
+        return true, "catalog_path_repaired"
+    end
+    if catalog_status ~= "ambiguous"
+        and isSupportedNativeBookPath(snapshot.native_path)
+        and isReadable(snapshot.native_path)
+    then
+        return true
+    end
+    if catalog_status == "ambiguous" then
+        return false, "ambiguous native catalog paths"
+    end
+    return false, "stored native path is stale"
+end
+
 local function readAnnotationState(asin)
     local keys = {}
     local file = io.open(ANNOTATION_STATE_DIR .. "/" .. asin, "r")
@@ -1224,7 +1251,17 @@ function Goodreads:resumeAnnotationOutbox()
         if isAsin(asin) and path == ANNOTATION_OUTBOX_DIR .. "/" .. asin then
             local snapshot, detail = readAnnotationOutbox(asin)
             if snapshot then
-                table.insert(snapshots, snapshot)
+                local refreshed, refresh_detail =
+                    refreshResumedAnnotationSnapshot(snapshot)
+                if refreshed then
+                    table.insert(snapshots, snapshot)
+                else
+                    self:debugLog("annotations_outbox_resume_failed", {
+                        asin = asin,
+                        status = safeDebugValue(
+                            refresh_detail or "native_path_unavailable"),
+                    })
+                end
             else
                 self:debugLog("annotations_outbox_resume_failed", {
                     asin = asin,

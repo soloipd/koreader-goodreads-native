@@ -1225,11 +1225,41 @@ restart_plugin.startAnnotationReconcile = function(self, queued)
     table.insert(resumed, queued)
     return true
 end
+local migrated_native_path = "/mnt/us/documents/Replaced_B012345678.kfx"
+local resume_original_open = io.open
+local resume_original_popen = io.popen
+io.open = function(path, mode)
+    if path == migrated_native_path and mode == "rb" then
+        return { close = function() end }
+    end
+    return resume_original_open(path, mode)
+end
+io.popen = function(command, mode)
+    if command:match("^/usr/bin/sqlite3 %-readonly /var/local/cc%.db") then
+        local values = { testHex(migrated_native_path) }
+        return {
+            lines = function()
+                local index = 0
+                return function()
+                    index = index + 1
+                    return values[index]
+                end
+            end,
+            close = function() end,
+        }
+    end
+    return resume_original_popen(command, mode)
+end
 restart_plugin:resumeAnnotationOutbox()
 assert(#resumed == 1, "KOReader restart must resume one coalesced source snapshot")
-assert(resumed[1].sequence == 1062, "restart must resume the newest durable sequence")
+assert(resumed[1].sequence == 1063,
+    "stale-path migration must advance the durable sequence exactly once")
+assert(resumed[1].native_path == migrated_native_path,
+    "restart must repair an existing stale outbox from the current catalog")
 assert(resumed[1].desired[1].finish == storage_snapshot.desired[1].finish,
     "restart must resume the newest user intent")
+io.open = resume_original_open
+io.popen = resume_original_popen
 
 os.execute = original_execute
 
