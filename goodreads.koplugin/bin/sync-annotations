@@ -8,7 +8,7 @@ set -u
 
 JAVA_BIN="/usr/java/bin/java"
 PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
-AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v4.jar"
+AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v15.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
 STATE_DIR="/mnt/us/koreader/settings/goodreads_native_annotations"
 LOCK_DIR="/tmp/goodreads-annotation-sync.lock"
@@ -16,7 +16,13 @@ PUBLISHED_RESULT="/tmp/goodreads-annotation-result.log"
 ATTACH_LOG="/tmp/goodreads-annotation-attach.log"
 ANNOTATION_CONTROLLER="com.lab126.KPPAnnotationController"
 ANNOTATION_ENQUEUE_PROPERTY="KSDKAnnotationsEnqueueForSync"
+SHADOW_SYNC_CONTROLLER="com.lab126.CVMShadowModeManager"
+LEGACY_SYNC_PROPERTY="KPPACShadowModeManagerShouldSyncLegacySidecarAndJournal"
+KSDK_SHADOW_SYNC_PROPERTY="KPPACShadowModeManagerShouldSyncKSDKAnnotations"
+WHISPERSYNC_CONTROLLER="com.lab126.whispersync"
+WHISPERSYNC_START_PROPERTY="startSync"
 LIPC_SET_PROP="/usr/bin/lipc-set-prop"
+LIPC_PROBE="/usr/bin/lipc-probe"
 lock_acquired=0
 state_temp=""
 request_result=""
@@ -85,7 +91,16 @@ esac
 
 state_file="$STATE_DIR/$asin"
 state_temp="$state_file.$$"
+if ! grep -Fqx 'agent_generation=15' "$state_file" 2>/dev/null; then
+    if ! printf '%s\n' \
+        'repair_zero_endpoint=true' \
+        'purge_legacy_cloud=true' \
+        'force_cloud_replay=true' >>"$payload"; then
+        exit 8
+    fi
+fi
 if ! awk -F= '
+    BEGIN { print "agent_generation=15" }
     /^desired\.[0-9]+\.start=/ {
         key=$1; sub(/\.start$/, "", key); start[key]=$2
     }
@@ -105,11 +120,30 @@ if ! awk -F= '
 fi
 chmod 0600 "$state_temp"
 
+if [ -x "$LIPC_PROBE" ] \
+    && "$LIPC_PROBE" "$ANNOTATION_CONTROLLER" 2>/dev/null \
+        | grep -Fq 'annotationsDualWriteToKSDK'; then
+    printf '%s\n' 'ksdk_dualwrite_available=true' >>"$payload"
+else
+    printf '%s\n' 'ksdk_dualwrite_available=false' >>"$payload"
+fi
+
 # KOReader and this helper run as root, but Amazon's framework JVM runs under a
 # firmware-specific account. Resolve its numeric identity from /proc instead of
 # assuming passwd/group names. Java reports EACCES here as FileNotFoundException,
 # which otherwise looks like an attach timing failure.
 if ! chown "$framework_uid:$framework_gid" "$payload" || ! chmod 0600 "$payload"; then
+    exit 9
+fi
+
+# ShadowModeManager consults these session flags while the native book is
+# being written and closed. Setting them after agentmain returns is too late:
+# WhisperStore accepts the journal edit, but KPP does not schedule its upload.
+if [ ! -x "$LIPC_SET_PROP" ] \
+    || ! "$LIPC_SET_PROP" "$SHADOW_SYNC_CONTROLLER" "$LEGACY_SYNC_PROPERTY" 1 \
+        >/dev/null 2>&1 \
+    || ! "$LIPC_SET_PROP" "$SHADOW_SYNC_CONTROLLER" "$KSDK_SHADOW_SYNC_PROPERTY" 1 \
+        >/dev/null 2>&1; then
     exit 9
 fi
 
@@ -143,7 +177,11 @@ fi
 
 enqueue_ok=0
 if grep -Fqx 'success=true' "$request_result" \
-    && grep -Fqx 'local_verified=true' "$request_result"; then
+    && grep -Fqx 'local_verified=true' "$request_result" \
+    && grep -Fqx 'native_notified=true' "$request_result" \
+    && grep -Eq '^ksdk_synced=(true|unavailable)$' "$request_result" \
+    && grep -Fqx 'cloud_synced=true' "$request_result" \
+    && grep -Fqx 'cloud_snapshot_synced=true' "$request_result"; then
     # ReaderSDK mutations update the native annotation store. Explicitly hand
     # that store to Amazon's annotation sync client as the native reader does;
     # otherwise a direct agent mutation may remain local indefinitely.
@@ -153,6 +191,8 @@ if grep -Fqx 'success=true' "$request_result" \
     fi
     if [ -x "$LIPC_SET_PROP" ] \
         && "$LIPC_SET_PROP" "$ANNOTATION_CONTROLLER" "$ANNOTATION_ENQUEUE_PROPERTY" koreader \
+            >/dev/null 2>&1 \
+        && "$LIPC_SET_PROP" "$WHISPERSYNC_CONTROLLER" "$WHISPERSYNC_START_PROPERTY" koreader \
             >/dev/null 2>&1; then
         printf '%s\n' 'local_success=true' 'sync_enqueued=true' 'success=true' \
             >>"$normalized_result"

@@ -1,5 +1,7 @@
 import com.amazon.ebook.booklet.reader.impl.annotation.personal.Highlight;
 import com.amazon.ebook.booklet.reader.impl.annotation.personal.Note;
+import com.amazon.ebook.booklet.reader.impl.annotation.AnnotationWriteOperationType;
+import com.amazon.ebook.booklet.reader.impl.whisperstore.WhisperStoreLipcBridge;
 import com.amazon.kindle.restricted.runtime.Framework;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -11,37 +13,84 @@ import java.util.List;
 import java.util.Map;
 import testsupport.Fakes;
 
-public final class GoodreadsAnnotationAgentV4Test {
+public final class GoodreadsAnnotationAgentV15Test {
     private static final String ASIN = "B0FLB24198";
     private static final String START = "AAAAAAAAAAAA";
     private static final String END = "AAAAAAAAAAAB";
     private static final String OTHER_START = "AAAAAAAAAAAC";
     private static final String OTHER_END = "AAAAAAAAAAAD";
+    private static final int START_SHORT = 100;
+    private static final int END_SHORT = 200;
     private static int requestSequence = 10000000;
 
-    private GoodreadsAnnotationAgentV4Test() {}
+    private GoodreadsAnnotationAgentV15Test() {}
 
     public static void main(String[] ignored) throws Exception {
         Fakes.SDK sdk = new Fakes.SDK();
         Framework.setService(sdk);
+        WhisperStoreLipcBridge.reset();
 
         Map<String, String> created = run(sdk, desired("first note"), previous());
         expect("true", created.get("success"), "create should succeed");
         expect("true", created.get("local_verified"), "create should be verified after reopen");
+        expect("true", created.get("native_notified"), "native reader should be notified");
+        expect("2", created.get("native_notifications"), "highlight and note should reach KPP/KSDK");
+        expect("2", created.get("ksdk_writes"), "highlight and note should be dual-written to KSDK");
+        expect("true", created.get("ksdk_synced"), "KSDK writes should be confirmed");
         expect("1", created.get("highlights_created"), "highlight should be created");
         expect("1", created.get("notes_created"), "note should be created");
+        expect("2", created.get("cloud_edits"), "highlight and note should reach WhisperStore");
+        expect("1", created.get("cloud_snapshots"), "verified sidecar should be fully ingested");
+        expect("true", created.get("cloud_snapshot_synced"), "cloud snapshot should be confirmed");
         expect(2, sdk.content.manager.annotations.size(), "native store should contain highlight and note");
         expect(true, sdk.content.lastBook.closed, "native book should close after create");
+        expect(AnnotationWriteOperationType.CREATE, sdk.proxy.operations.get(0),
+            "highlight create should notify KPP/KSDK");
+        expect(AnnotationWriteOperationType.CREATE, sdk.proxy.operations.get(1),
+            "note create should notify KPP/KSDK");
+
+        Highlight corrupt = new Highlight(
+            new Fakes.Position("AAAAAAAAAAAZ", 0),
+            new Fakes.Position(START, START_SHORT)
+        );
+        sdk.content.manager.annotations.add(corrupt);
+        List<String> migrationPayload = desired("first note");
+        migrationPayload.add("repair_zero_endpoint=true");
+        migrationPayload.add("purge_legacy_cloud=true");
+        migrationPayload.add("force_cloud_replay=true");
+        Map<String, String> migrated = run(
+            sdk,
+            migrationPayload,
+            previous(START, END, true)
+        );
+        expect("true", migrated.get("success"), "migration replay should succeed");
+        expect("0", migrated.get("highlights_created"), "migration should not duplicate highlights");
+        expect("1", migrated.get("zero_endpoint_repairs"),
+            "migration should remove the generation-6 zero-endpoint artifact");
+        expect("1", migrated.get("native_notifications"),
+            "migration should notify exactly once for the corrupt-record deletion");
+        expect("3", migrated.get("ksdk_writes"),
+            "migration should delete the corrupt record and replay the correct pair to KSDK");
+        expect("4", migrated.get("cloud_edits"),
+            "migration should delete broken cloud records and replay correct records");
+        expect("2", migrated.get("legacy_cloud_deletes"),
+            "migration should purge the malformed cloud highlight and note");
 
         Map<String, String> updated = run(sdk, desired("edited note"), previous(START, END, true));
         expect("true", updated.get("success"), "note update should succeed");
         expect("1", updated.get("notes_updated"), "note should be updated");
         expect("edited note", findNote(sdk).getText(), "native note text should change");
+        expect(AnnotationWriteOperationType.UPDATE,
+            sdk.proxy.operations.get(sdk.proxy.operations.size() - 1),
+            "note update should notify KPP/KSDK");
 
         Map<String, String> noteRemoved = run(sdk, desired(""), previous(START, END, true));
         expect("true", noteRemoved.get("success"), "note removal should succeed");
         expect("1", noteRemoved.get("notes_deleted"), "owned note should be deleted");
         expect(1, sdk.content.manager.annotations.size(), "highlight should remain after note removal");
+        expect(AnnotationWriteOperationType.DELETE,
+            sdk.proxy.operations.get(sdk.proxy.operations.size() - 1),
+            "note deletion should notify KPP/KSDK");
 
         Map<String, String> deleted = run(sdk, noDesired(), previous(START, END, false));
         expect("true", deleted.get("success"), "highlight deletion should succeed");
@@ -49,8 +98,8 @@ public final class GoodreadsAnnotationAgentV4Test {
         expect(0, sdk.content.manager.annotations.size(), "owned range should be removed");
 
         Highlight nativeOnly = new Highlight(
-            new Fakes.Position(OTHER_START),
-            new Fakes.Position(OTHER_END)
+            new Fakes.Position(OTHER_START, 300),
+            new Fakes.Position(OTHER_END, 400)
         );
         sdk.content.manager.annotations.add(nativeOnly);
         Map<String, String> preserved = run(sdk, noDesired(), previous());
@@ -61,8 +110,8 @@ public final class GoodreadsAnnotationAgentV4Test {
         Fakes.SDK reversedSdk = new Fakes.SDK();
         Framework.setService(reversedSdk);
         reversedSdk.content.manager.annotations.add(new Highlight(
-            new Fakes.Position(END),
-            new Fakes.Position(START)
+            new Fakes.Position(END, END_SHORT),
+            new Fakes.Position(START, START_SHORT)
         ));
         Map<String, String> reversed = run(
             reversedSdk,
@@ -95,6 +144,7 @@ public final class GoodreadsAnnotationAgentV4Test {
         lines.add("asin=" + ASIN);
         lines.add("request_id=" + (++requestSequence));
         lines.add("native_path_hex=" + hex("/mnt/us/documents/Test_B0FLB24198.kfx"));
+        lines.add("ksdk_dualwrite_available=true");
         return lines;
     }
 
@@ -102,7 +152,9 @@ public final class GoodreadsAnnotationAgentV4Test {
         List<String> lines = basePayload();
         lines.add("desired_count=1");
         lines.add("desired.0.start=" + START);
+        lines.add("desired.0.start_short=" + START_SHORT);
         lines.add("desired.0.end=" + END);
+        lines.add("desired.0.end_short=" + END_SHORT);
         lines.add("desired.0.note_hex=" + hex(note));
         return lines;
     }
@@ -138,7 +190,7 @@ public final class GoodreadsAnnotationAgentV4Test {
         Path result = Paths.get("/tmp/goodreads-annotation-result-" + requestId + ".log");
         Files.write(path, payload, StandardCharsets.ISO_8859_1);
         Files.deleteIfExists(result);
-        GoodreadsAnnotationAgentV4.agentmain(path.toString(), null);
+        GoodreadsAnnotationAgentV15.agentmain(path.toString(), null);
         expect(false, Files.exists(path), "agent must remove payload after loading it");
         Map<String, String> fields = readResult(result);
         Files.deleteIfExists(result);

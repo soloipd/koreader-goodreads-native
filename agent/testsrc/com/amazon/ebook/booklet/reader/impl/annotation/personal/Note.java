@@ -1,8 +1,9 @@
 package com.amazon.ebook.booklet.reader.impl.annotation.personal;
 
 import testsupport.Fakes;
+import com.amazon.ebook.booklet.reader.sdk.content.annotation.Annotation;
 
-public class Note {
+public class Note implements Annotation {
     private String text;
     private final Fakes.Position start;
     private final Fakes.Position end;
@@ -32,4 +33,10 @@ public class Note {
     public void setText(String value) {
         text = value;
     }
+
+    public Object Cf() { return text; }
+
+    public Object L() { return null; }
+
+    public Object Cd() { return null; }
 }

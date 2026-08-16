@@ -3,6 +3,28 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.3] - 2026-08-16
+
+### Fixed
+
+- KFX short PIDs are now preserved alongside long positions. Reconstructing a
+  position from its long form alone could produce an end PID of zero, turning a
+  short selection into an apparent highlight from the beginning of the book.
+- Annotation writes now pass through the native KPP notification path and
+  WhisperStore's `add_or_update_annotation_edit` / `delete_annotation_edit`
+  journal. A direct KSDK dual-write is attempted only on firmware that exports
+  that controller operation; otherwise diagnostics report it as unavailable
+  instead of incorrectly claiming success. The helper enables the native sync
+  lanes before the write, enqueues annotation sync, and starts WhisperSync.
+- Existing malformed zero-endpoint records are removed locally and from
+  WhisperStore once, then the corrected highlights and notes are replayed.
+- Color-highlight metadata is normalized only for the cloud call, working
+  around firmware that casts Kindle's color map directly to a string while
+  leaving the native highlight and its color unchanged.
+- Success now requires local close/reopen readback, native notification,
+  WhisperStore acceptance, and native sync-queue acceptance. KSDK status is
+  reported separately as `true` or `unavailable`.
+
 ## [0.3.2] - 2026-08-16
 
 ### Changed

@@ -90,14 +90,20 @@ KOReader's normalized EPUB XPointer, counts Unicode characters from the nearest
 KFX anchor, and emits the exact native short and long positions.
 
 The annotation agent opens the explicit native KFX book, reconciles highlight
-and note objects through `AnnotationManager`, and closes the book. A transient
+and note objects through `AnnotationManager`, notifies the KPP proxy, and
+journals cloud edits through `com.lab126.whisperstore`. A direct KSDK dual-write
+is conditional because some firmware does not export that controller method. A transient
 mode-0600 payload carries note text. Ownership is transferred from KOReader's
-root process to the framework JVM's dynamically resolved UID/GID, then the V2 agent removes it
+root process to the framework JVM's dynamically resolved UID/GID, then the versioned agent removes it
 immediately after loading, with bounded fallback cleanup by the helper; persistent plugin
 state contains coordinate keys only. Diagnostics expose only counts and
-sanitized success/failure stages. After local reconciliation, the shell
-explicitly invokes `KSDKAnnotationsEnqueueForSync`; a failed enqueue is treated
-as retryable and is not reported as end-to-end success. Only one native annotation request runs at a
+sanitized success/failure stages. The agent closes and reopens the book before
+reporting local verification. Before the agent write, the shell enables both
+the legacy journal and KSDK shadow-mode lanes. After local, proxy, and
+WhisperStore stages succeed, it invokes `KSDKAnnotationsEnqueueForSync` and
+starts `com.lab126.whispersync`; a failed trigger is retryable and is not
+reported as end-to-end success. The optional direct KSDK write is reported as
+`unavailable` when its LIPC property is absent. Only one native annotation request runs at a
 time. Rapid edits for the same ASIN coalesce to the newest immutable snapshot,
 while snapshots for other books remain queued. Transient native failures retry
 up to three times; a newer same-book snapshot cancels an older retry. Because
