@@ -752,6 +752,59 @@ LIMIT 3;]], asin)
     return nil, "not_found"
 end
 
+local function isSupportedConvertedEpubPath(path)
+    return type(path) == "string"
+        and path:match("^/mnt/us/koreader/cache/.+%.epub$") ~= nil
+        and not path:find("[\r\n%z]")
+end
+
+local function resolveConvertedEpubPathFromCatalog(asin)
+    if not isAsin(asin) then return nil, "invalid" end
+    local query = string.format([[
+SELECT DISTINCT lower(hex(p_uuid))
+FROM Entries
+WHERE p_cdeKey='%s'
+  AND p_cdeType IN ('EBOK','PDOC')
+  AND COALESCE(p_isArchived,0)=0
+  AND COALESCE(p_isDownloading,0)=0
+  AND COALESCE(p_isVisibleInHome,1)=1
+  AND COALESCE(p_contentState,1)=1
+  AND p_location LIKE '/mnt/us/documents/%%'
+  AND (lower(p_location) GLOB '*.kfx'
+    OR lower(p_location) GLOB '*.azw'
+    OR lower(p_location) GLOB '*.azw3'
+    OR lower(p_location) GLOB '*.mobi'
+    OR lower(p_location) GLOB '*.prc')
+LIMIT 3;]], asin)
+    local command = string.format(
+        "%s -readonly %s \"%s\" 2>/dev/null",
+        SQLITE_TOOL,
+        CONTENT_CATALOG,
+        query
+    )
+    local pipe = io.popen(command, "r")
+    if not pipe then return nil, "unavailable" end
+    local candidates = {}
+    for encoded in pipe:lines() do
+        local uuid = hexDecode(encoded, 64)
+        local compact, hyphen_count
+        if uuid then
+            compact, hyphen_count = uuid:gsub("%-", "")
+        end
+        if compact and #uuid == 36 and #compact == 32 and hyphen_count == 4
+            and compact:match("^%x+$")
+        then
+            local path = "/mnt/us/koreader/cache/kindle.koplugin/cc_"
+                .. uuid .. ".epub"
+            if isReadable(path) then table.insert(candidates, path) end
+        end
+    end
+    pipe:close()
+    if #candidates == 1 then return candidates[1], "unique" end
+    if #candidates > 1 then return nil, "ambiguous" end
+    return nil, "not_found"
+end
+
 local function getAnnotationBookPaths(reader, asin)
     local document = reader and reader.document
     local epub_path = document and document.file
@@ -766,12 +819,65 @@ local function getAnnotationBookPaths(reader, asin)
         native_path = mapped_path
     end
     if type(epub_path) ~= "string"
-        or not epub_path:match("^/mnt/us/koreader/cache/.+%.epub$")
+        or not isSupportedConvertedEpubPath(epub_path)
+        or not isReadable(epub_path)
         or not isSupportedNativeBookPath(native_path)
     then
         return nil, nil
     end
     return epub_path, native_path
+end
+
+local function refreshResumedAnnotationSnapshot(snapshot)
+    if type(snapshot) ~= "table" or not isAsin(snapshot.asin) then
+        return false, "invalid resumed snapshot"
+    end
+    local catalog_path, catalog_status =
+        resolveNativeBookPathFromCatalog(snapshot.asin)
+    local repaired = false
+    if catalog_path then
+        if catalog_path ~= snapshot.native_path then
+            snapshot.native_path = catalog_path
+            repaired = true
+        end
+    elseif catalog_status ~= "ambiguous"
+        and isSupportedNativeBookPath(snapshot.native_path)
+        and isReadable(snapshot.native_path)
+    then
+        -- The catalog can be temporarily unavailable during startup; retain a
+        -- strictly validated readable path already stored in the outbox.
+    elseif catalog_status == "ambiguous" then
+        return false, "ambiguous native catalog paths"
+    else
+        return false, "stored native path is stale"
+    end
+
+    local catalog_epub, epub_status =
+        resolveConvertedEpubPathFromCatalog(snapshot.asin)
+    if catalog_epub then
+        if catalog_epub ~= snapshot.epub_path then
+            snapshot.epub_path = catalog_epub
+            repaired = true
+        end
+    elseif epub_status ~= "ambiguous"
+        and isSupportedConvertedEpubPath(snapshot.epub_path)
+        and isReadable(snapshot.epub_path)
+    then
+        -- Same temporary-catalog fallback as the native path above.
+    elseif epub_status == "ambiguous" then
+        return false, "ambiguous converted catalog paths"
+    else
+        return false, "stored converted path is stale"
+    end
+
+    if repaired then
+        local persisted, detail = persistAnnotationOutbox(snapshot)
+        if not persisted then
+            return false, detail or "cannot persist repaired outbox"
+        end
+        return true, "catalog_paths_repaired"
+    end
+    return true
 end
 
 local function readAnnotationState(asin)
@@ -1224,7 +1330,17 @@ function Goodreads:resumeAnnotationOutbox()
         if isAsin(asin) and path == ANNOTATION_OUTBOX_DIR .. "/" .. asin then
             local snapshot, detail = readAnnotationOutbox(asin)
             if snapshot then
-                table.insert(snapshots, snapshot)
+                local refreshed, refresh_detail =
+                    refreshResumedAnnotationSnapshot(snapshot)
+                if refreshed then
+                    table.insert(snapshots, snapshot)
+                else
+                    self:debugLog("annotations_outbox_resume_failed", {
+                        asin = asin,
+                        status = safeDebugValue(
+                            refresh_detail or "native_path_unavailable"),
+                    })
+                end
             else
                 self:debugLog("annotations_outbox_resume_failed", {
                     asin = asin,

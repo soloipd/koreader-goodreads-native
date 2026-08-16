@@ -303,6 +303,7 @@ local function testHex(value)
 end
 local catalog_native_path = "/mnt/us/documents/current local copy.kfx"
 local stale_native_path = "/mnt/us/documents/removed copy.kfx"
+local catalog_epub_path = "/mnt/us/koreader/cache/kindle.koplugin/cc_test.epub"
 package.loaded["lua/readerui_ext"] = {
     virtual_library = {
         getVirtualPath = function(_, value) return value end,
@@ -328,7 +329,9 @@ local annotation_catalog_reader = {
 local annotation_catalog_plugin = newPlugin(settings({ annotation_sync_enabled = true }))
 local original_catalog_open = io.open
 io.open = function(path, mode)
-    if path == catalog_native_path and mode == "rb" then
+    if (path == catalog_native_path or path == catalog_epub_path)
+        and mode == "rb"
+    then
         return { close = function() end }
     end
     return original_catalog_open(path, mode)
@@ -1220,16 +1223,63 @@ assert(computed_checksum == final_checksum, "final outbox checksum must verify")
 
 local resumed = {}
 local restart_plugin = newPlugin(settings({ annotation_sync_enabled = true }))
+local resume_failure_status
+restart_plugin.debugLog = function(_, event, fields)
+    if event == "annotations_outbox_resume_failed" then
+        resume_failure_status = fields.status
+    end
+end
 restart_plugin.startAnnotationReconcile = function(self, queued)
     self.annotation_sync_inflight = queued
     table.insert(resumed, queued)
     return true
 end
+local migrated_native_path = "/mnt/us/documents/Replaced_B012345678.kfx"
+local migrated_uuid = "12345678-1234-1234-1234-123456789abc"
+local migrated_epub_path = "/mnt/us/koreader/cache/kindle.koplugin/cc_"
+    .. migrated_uuid .. ".epub"
+local resume_original_open = io.open
+local resume_original_popen = io.popen
+io.open = function(path, mode)
+    if (path == migrated_native_path or path == migrated_epub_path)
+        and mode == "rb"
+    then
+        return { close = function() end }
+    end
+    return resume_original_open(path, mode)
+end
+io.popen = function(command, mode)
+    if command:match("^/usr/bin/sqlite3 %-readonly /var/local/cc%.db") then
+        local value = command:match("hex%(p_uuid%)")
+            and testHex(migrated_uuid)
+            or testHex(migrated_native_path)
+        local values = { value }
+        return {
+            lines = function()
+                local index = 0
+                return function()
+                    index = index + 1
+                    return values[index]
+                end
+            end,
+            close = function() end,
+        }
+    end
+    return resume_original_popen(command, mode)
+end
 restart_plugin:resumeAnnotationOutbox()
-assert(#resumed == 1, "KOReader restart must resume one coalesced source snapshot")
-assert(resumed[1].sequence == 1062, "restart must resume the newest durable sequence")
+assert(#resumed == 1, "KOReader restart must resume one coalesced source snapshot: "
+    .. tostring(resume_failure_status))
+assert(resumed[1].sequence == 1063,
+    "stale-path migration must advance the durable sequence exactly once")
+assert(resumed[1].native_path == migrated_native_path,
+    "restart must repair an existing stale outbox from the current catalog")
+assert(resumed[1].epub_path == migrated_epub_path,
+    "restart must repair the converted cache path in the same durable sequence")
 assert(resumed[1].desired[1].finish == storage_snapshot.desired[1].finish,
     "restart must resume the newest user intent")
+io.open = resume_original_open
+io.popen = resume_original_popen
 
 os.execute = original_execute
 

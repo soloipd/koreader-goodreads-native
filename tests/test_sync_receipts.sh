@@ -58,10 +58,14 @@ grep -Fqx 'effective_state=waiting_native' <<<"$status"
 GOODREADS_PLUGIN_DIR="$plugin_dir" GOODREADS_SETTINGS_DIR="$settings_dir" \
     GOODREADS_LOCK_DIR="$test_root" \
     "$helper" retry "$asin" >/dev/null
-for _ in 1 2 3 4 5; do
+for _ in $(seq 1 30); do
     [ -s "$test_root/retry-called" ] && break
     sleep 0.1
 done
+[ -s "$test_root/retry-called" ] || {
+    printf 'error: detached retry helper did not start within 3 seconds\n' >&2
+    exit 1
+}
 grep -Fqx -- "--once $asin" "$test_root/retry-called"
 
 # The real one-shot watcher must replay only the selected ASIN and increment
