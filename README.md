@@ -278,9 +278,10 @@ against Kindle's current read-only content catalog. If a conversion still
 points at a file that Kindle moved or replaced, the unique readable, visible,
 non-archived local ebook row is used. Multiple valid local rows are never
 guessed between; annotation handoff pauses until the ambiguity is resolved.
-The same validation runs before a pre-upgrade durable outbox is resumed. A
-unique moved path is atomically rewritten at a newer sequence before execution,
-while a stale or ambiguous outbox remains safely pending.
+The same validation runs before a pre-upgrade durable outbox is resumed. Unique
+current native-book and converted-EPUB paths are atomically rewritten together
+at one newer sequence before execution, while a stale or ambiguous outbox
+remains safely pending.
 
 ### Native and cloud delivery
 
