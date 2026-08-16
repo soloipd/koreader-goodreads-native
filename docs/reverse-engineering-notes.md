@@ -14,8 +14,15 @@ obfuscated and may change between firmware releases.
 - Publisher: `com.lab126.kppkaf`
 - Hash property: `kppAddToGoodreadShelf`
 - Payload fields: `action`, `cdekey`
-- Actions used: `com.amazon.home.actions.goodread_reading` and
+- Actions used: `com.amazon.home.actions.goodread_want_to_read`,
+  `com.amazon.home.actions.goodread_reading`, and
   `com.amazon.home.actions.goodread_read`
+- Readback action: `currentShelf`
+
+Firmware 5.19.5's `GoodreadShelfHandler` maps only those three write actions to
+the native `Shelf` enum. Its write path returns the current shelf after the
+native transaction, which allows an exact response check without reading or
+storing the Amazon session.
 
 ## Progress request
 

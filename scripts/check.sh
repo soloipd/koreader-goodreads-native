@@ -143,6 +143,7 @@ case "$lua_checker" in
         "$lua_checker" -p "$plugin_dir/main.lua"
         "$lua_checker" -p "$plugin_dir/_meta.lua"
         "$lua_checker" -p "$plugin_dir/annotationoutbox.lua"
+        "$lua_checker" -p "$plugin_dir/shelfstate.lua"
         ;;
     lua5.1|luajit)
         LUA_CHECK_FILE="$plugin_dir/main.lua" \
@@ -150,6 +151,8 @@ case "$lua_checker" in
         LUA_CHECK_FILE="$plugin_dir/_meta.lua" \
             "$lua_checker" -e 'assert(loadfile(os.getenv("LUA_CHECK_FILE")))'
         LUA_CHECK_FILE="$plugin_dir/annotationoutbox.lua" \
+            "$lua_checker" -e 'assert(loadfile(os.getenv("LUA_CHECK_FILE")))'
+        LUA_CHECK_FILE="$plugin_dir/shelfstate.lua" \
             "$lua_checker" -e 'assert(loadfile(os.getenv("LUA_CHECK_FILE")))'
         ;;
     '')
@@ -172,6 +175,7 @@ if [ -n "$lua_runtime" ]; then
         GOODREADS_SHA256_TOOL="$(command -v sha256sum)" \
         "$lua_runtime" "$project_root/tests/test_main.lua"
     PROJECT_ROOT="$project_root" "$lua_runtime" "$project_root/tests/test_annotation_outbox.lua"
+    PROJECT_ROOT="$project_root" "$lua_runtime" "$project_root/tests/test_shelf_state.lua"
     rm -rf "$outbox_test_root"
     trap - EXIT HUP INT TERM
 else

@@ -14,14 +14,16 @@ local json = require("json")
 local util = require("util")
 local Event = require("ui/event")
 local AnnotationOutbox = require("annotationoutbox")
+local ShelfState = require("shelfstate")
 
 local LIPC_HASH_TOOL = "/usr/bin/lipc-hash-prop"
 local SQLITE_TOOL = "/usr/bin/sqlite3"
 local CONTENT_CATALOG = "/var/local/cc.db"
 local KAF_PUBLISHER = "com.lab126.kppkaf"
 local KAF_PROPERTY = "kppAddToGoodreadShelf"
-local ACTION_READING = "com.amazon.home.actions.goodread_reading"
-local ACTION_READ = "com.amazon.home.actions.goodread_read"
+local ACTION_READING = ShelfState.ACTION_READING
+local ACTION_READ = ShelfState.ACTION_READ
+local ACTION_WANT_TO_READ = ShelfState.ACTION_WANT_TO_READ
 local PROGRESS_HELPER = "/mnt/us/koreader/plugins/goodreads.koplugin/bin/sync-progress"
 local ANNOTATION_HELPER = "/mnt/us/koreader/plugins/goodreads.koplugin/bin/sync-annotations"
 local RECEIPT_HELPER = "/mnt/us/koreader/plugins/goodreads.koplugin/bin/manage-sync-receipts"
@@ -436,6 +438,27 @@ local function percentageForProgress(percent)
 
     local rounded = math.floor(percent * 100 + 0.5)
     return math.max(0, math.min(100, rounded))
+end
+
+local function shelfActionName(action)
+    return ShelfState.key(action) or "unsupported"
+end
+
+local function shelfActionLabel(action)
+    if action == ACTION_WANT_TO_READ then return _("Want to Read") end
+    if action == ACTION_READING then return _("Currently Reading") end
+    if action == ACTION_READ then return _("Read") end
+    return _("Unknown")
+end
+
+local function outputConfirmsShelf(output, expected_action)
+    if type(output) ~= "string" then return false end
+    for observed in output:gmatch(
+        "com%.amazon%.home%.actions%.goodread_[a-z_]+"
+    ) do
+        if observed == expected_action then return true end
+    end
+    return false
 end
 
 local function readKeyValueFile(path, allowed_keys)
@@ -2208,6 +2231,8 @@ function Goodreads:init()
     if type(self.settings.ratings) ~= "table" then
         self.settings.ratings = {}
     end
+    self.settings.manual_shelf_overrides = ShelfState.sanitize(
+        self.settings.manual_shelf_overrides)
     if type(self.settings.native_annotation_tombstones) ~= "table" then
         self.settings.native_annotation_tombstones = {}
     end
@@ -2386,9 +2411,20 @@ function Goodreads:syncCapturedCheckpoint(asin, percent, status, trigger, resolv
 
     local action = actionForState(percent, status)
     local whole_percent = percentageForProgress(percent)
+    local override_changed, suppress_progress
+    action, override_changed, suppress_progress = ShelfState.resolve(
+        self.settings.manual_shelf_overrides,
+        asin,
+        percent,
+        action
+    )
+    if override_changed then
+        self:saveSettings()
+    end
     self.last_checkpoint = {
         asin = asin,
         percent = whole_percent,
+        shelf_action = shelfActionName(action),
         trigger = trigger,
         resolver = resolver,
         time = os.time(),
@@ -2399,9 +2435,7 @@ function Goodreads:syncCapturedCheckpoint(asin, percent, status, trigger, resolv
         asin = asin,
         percent = whole_percent,
         resolver = resolver or "unknown",
-        action = action == ACTION_READ and "read"
-            or action == ACTION_READING and "currently_reading"
-            or "none",
+        action = action and shelfActionName(action) or "none",
         status = status or "none",
     })
 
@@ -2415,10 +2449,18 @@ function Goodreads:syncCapturedCheckpoint(asin, percent, status, trigger, resolv
     -- is not the percentage transport. Re-publishing the same action at every
     -- periodic percentage checkpoint keeps waking KPP and, on some firmware,
     -- can leave KOReader and powerd in an event loop behind the native reader.
-    if self.settings.enabled and trigger ~= "periodic" then
+    -- Consuming an explicit override is a real shelf transition, so that one
+    -- periodic checkpoint is allowed to publish the changed action.
+    if self.settings.enabled
+        and (trigger ~= "periodic" or override_changed)
+    then
         shelf_ok = self:syncAsin(asin, action, percent, false, trigger)
     end
-    if self.settings.percentage_enabled then
+    if self.settings.percentage_enabled
+        and not suppress_progress
+        and whole_percent
+        and whole_percent >= 1
+    then
         progress_ok = self:syncProgress(asin, percent, trigger)
     end
     return shelf_ok and progress_ok, "checkpoint processed"
@@ -2854,12 +2896,13 @@ function Goodreads:syncAsin(asin, action, percent, wait_for_result, trigger)
         return false, "not an Amazon ASIN"
     end
 
-    if action ~= ACTION_READING and action ~= ACTION_READ then
+    if not ShelfState.isSupported(action) then
         return false, "unsupported native action"
     end
 
     local now = os.time()
-    if self.last_sync
+    if not wait_for_result
+        and self.last_sync
         and self.last_sync.asin == asin
         and self.last_sync.action == action
         and now - self.last_sync.time < (self.settings.dedupe_seconds or 300)
@@ -2868,7 +2911,7 @@ function Goodreads:syncAsin(asin, action, percent, wait_for_result, trigger)
             trigger = trigger or "unknown",
             asin = asin,
             percent = percentageForProgress(percent),
-            action = action == ACTION_READ and "read" or "currently_reading",
+            action = shelfActionName(action),
             status = "recent_duplicate",
         })
         return true, "already sent recently"
@@ -2886,7 +2929,64 @@ function Goodreads:syncAsin(asin, action, percent, wait_for_result, trigger)
     else
         -- The shell delay survives a full KOReader exit and gives
         -- kindle.koplugin time to finish its native cc.db write.
-        os.execute("(sleep 1; " .. command .. ") >/dev/null 2>&1 &")
+        local queued = os.execute(
+            "(sleep 1; " .. command .. ") >/dev/null 2>&1 &")
+        if queued ~= true and queued ~= 0 then
+            self:debugLog("shelf_result", {
+                trigger = trigger or "automatic",
+                asin = asin,
+                percent = percentageForProgress(percent),
+                action = shelfActionName(action),
+                status = "queue_process_failed",
+                success = false,
+            })
+            return false, "native Goodreads action could not be queued"
+        end
+    end
+
+    if wait_for_result then
+        if output == "" then
+            self:debugLog("shelf_result", {
+                trigger = trigger or "manual",
+                asin = asin,
+                percent = percentageForProgress(percent),
+                action = shelfActionName(action),
+                status = "no_native_response",
+                success = false,
+            })
+            return false, "native Goodreads action returned no response"
+        end
+        if not outputConfirmsShelf(output, action) then
+            self:debugLog("shelf_result", {
+                trigger = trigger or "manual",
+                asin = asin,
+                percent = percentageForProgress(percent),
+                action = shelfActionName(action),
+                status = "readback_mismatch",
+                success = false,
+            })
+            return false, "native Goodreads readback did not confirm the requested shelf"
+        end
+        self.last_sync = {
+            asin = asin,
+            action = action,
+            percent = percent,
+            time = now,
+        }
+        self:debugLog("shelf_result", {
+            trigger = trigger or "manual",
+            asin = asin,
+            percent = percentageForProgress(percent),
+            action = shelfActionName(action),
+            status = "confirmed_by_native_readback",
+            success = true,
+        })
+        logger.info(
+            "GoodreadsNative: confirmed native shelf action",
+            shelfActionName(action),
+            percentageForProgress(percent) or 0
+        )
+        return true, "confirmed"
     end
 
     self.last_sync = {
@@ -2895,39 +2995,18 @@ function Goodreads:syncAsin(asin, action, percent, wait_for_result, trigger)
         percent = percent,
         time = now,
     }
-
-    logger.info("GoodreadsNative: sent native shelf action", asin, action, percent or 0)
-
-    if wait_for_result then
-        if output == "" then
-            self:debugLog("shelf_result", {
-                trigger = trigger or "manual",
-                asin = asin,
-                percent = percentageForProgress(percent),
-                action = action == ACTION_READ and "read" or "currently_reading",
-                status = "no_native_response",
-                success = false,
-            })
-            return false, "native Goodreads action returned no response"
-        end
-        self:debugLog("shelf_result", {
-            trigger = trigger or "manual",
-            asin = asin,
-            percent = percentageForProgress(percent),
-            action = action == ACTION_READ and "read" or "currently_reading",
-            status = "native_response_received",
-            success = true,
-        })
-        return true, output:gsub("%s+$", "")
-    end
-
     self:debugLog("shelf_queued", {
         trigger = trigger or "automatic",
         asin = asin,
         percent = percentageForProgress(percent),
-        action = action == ACTION_READ and "read" or "currently_reading",
+        action = shelfActionName(action),
         status = "queued",
     })
+    logger.info(
+        "GoodreadsNative: queued native shelf action",
+        shelfActionName(action),
+        percentageForProgress(percent) or 0
+    )
     return true, "queued"
 end
 
@@ -2997,7 +3076,7 @@ function Goodreads:syncProgress(asin, fraction, trigger)
         time = now,
     }
 
-    logger.info("GoodreadsNative: queued silent percentage", asin, percent)
+    logger.info("GoodreadsNative: queued silent percentage", percent)
     self:debugLog("progress_queued", {
         trigger = trigger or "automatic",
         asin = asin,
@@ -3012,6 +3091,78 @@ function Goodreads:syncProgress(asin, fraction, trigger)
         delay + 0.5
     )
     return true, "queued"
+end
+
+function Goodreads:setCurrentBookShelf(action)
+    if not ShelfState.isSupported(action) then
+        UIManager:show(InfoMessage:new({
+            text = _("That Goodreads shelf is not supported by this Kindle."),
+            timeout = 4,
+        }))
+        return false
+    end
+
+    local reader = self.ui and self.ui.document and self.ui
+    local asin = reader and getBookAsin(reader)
+    if not isAsin(asin) then
+        UIManager:show(InfoMessage:new({
+            text = _("Open a Kindle ASIN book in KOReader first."),
+            timeout = 3,
+        }))
+        return false
+    end
+
+    local percent = select(1, getBookState(reader)) or 0
+    local ok, detail = self:syncAsin(
+        asin, action, percent, true, "manual_shelf")
+    if not ok then
+        UIManager:show(InfoMessage:new({
+            text = string.format(
+                _("Goodreads shelf was not confirmed: %s"),
+                detail or _("unknown error")
+            ),
+            timeout = 5,
+        }))
+        return false
+    end
+
+    local overrides, stored = ShelfState.set(
+        self.settings.manual_shelf_overrides,
+        asin,
+        action,
+        percent,
+        os.time()
+    )
+    if not stored then
+        UIManager:show(InfoMessage:new({
+            text = _("The shelf changed, but its local override could not be saved."),
+            timeout = 5,
+        }))
+        return false
+    end
+
+    self.settings.manual_shelf_overrides = overrides
+    if action == ACTION_READ then
+        self.settings.last_completed_asin = asin
+    end
+    self:rememberAsin(asin)
+    self:saveSettings()
+    self:debugLog("manual_shelf_confirmed", {
+        trigger = "manual_shelf",
+        asin = asin,
+        percent = percentageForProgress(percent),
+        action = shelfActionName(action),
+        status = "confirmed_by_native_readback",
+        success = true,
+    })
+    UIManager:show(InfoMessage:new({
+        text = string.format(
+            _("Goodreads shelf confirmed: %s"),
+            shelfActionLabel(action)
+        ),
+        timeout = 4,
+    }))
+    return true
 end
 
 function Goodreads:syncCurrentBook()
@@ -3050,7 +3201,7 @@ function Goodreads:syncCurrentBook()
     local progress_ok = self:syncProgress(asin, percent, "manual")
     local message
     if ok and progress_ok then
-        message = string.format(_("Goodreads shelf updated; percentage queued for %s."), asin)
+        message = _("Goodreads shelf confirmed; percentage queued.")
     else
         message = string.format(_("Goodreads sync failed: %s"), detail or _("unknown error"))
     end
@@ -3536,6 +3687,29 @@ function Goodreads:addToMainMenu(menu_items)
                         os.remove(NATIVE_IMPORT_ENABLED_FILE)
                     end
                 end,
+            },
+            {
+                text = _("Set Goodreads shelf…"),
+                sub_item_table = {
+                    {
+                        text = _("Want to Read"),
+                        callback = function()
+                            self:setCurrentBookShelf(ACTION_WANT_TO_READ)
+                        end,
+                    },
+                    {
+                        text = _("Currently Reading"),
+                        callback = function()
+                            self:setCurrentBookShelf(ACTION_READING)
+                        end,
+                    },
+                    {
+                        text = _("Read"),
+                        callback = function()
+                            self:setCurrentBookShelf(ACTION_READ)
+                        end,
+                    },
+                },
             },
             {
                 text = _("Rate current book…"),

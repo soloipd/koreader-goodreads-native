@@ -3,6 +3,33 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] - 2026-08-17
+
+### Added
+
+- Manual native Goodreads shelf selection for Want to Read, Currently Reading,
+  and Read from the KOReader menu.
+- A bounded per-book explicit-choice override so an unchanged periodic
+  checkpoint cannot immediately undo the selected shelf.
+
+### Safety
+
+- Manual shelf changes succeed only when the Kindle native response reports
+  the exact requested shelf. A missing or different readback creates no local
+  success receipt.
+- A failed background shelf-command launch is reported as a failure and creates
+  no queued receipt.
+- Want to Read and manually selected Read suppress contradictory percentage
+  traffic until genuine new progress or completion resumes automatic policy.
+- Durable overrides contain only an ASIN, native action, whole percentage, and
+  timestamp; malformed entries are discarded and only the newest 64 survive.
+
+### Tests
+
+- Added exact-readback, prefix-confusion, process-launch failure,
+  override-consumption, zero-progress, invalid-state, and 100-book bounded-state
+  coverage.
+
 ## [0.9.1] - 2026-08-16
 
 ### Fixed

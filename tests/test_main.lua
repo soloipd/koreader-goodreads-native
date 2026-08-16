@@ -67,6 +67,9 @@ end
 package.preload["annotationoutbox"] = function()
     return assert(dofile(project_root .. "/goodreads.koplugin/annotationoutbox.lua"))
 end
+package.preload["shelfstate"] = function()
+    return assert(dofile(project_root .. "/goodreads.koplugin/shelfstate.lua"))
+end
 
 local ReaderUI = {
     onClose = function(reader)
@@ -127,6 +130,7 @@ local function settings(overrides)
         annotation_sync_enabled = false,
         rating_prompted = {},
         ratings = {},
+        manual_shelf_overrides = {},
         dedupe_seconds = 300,
     }
     for key, override in pairs(overrides or {}) do
@@ -210,6 +214,111 @@ for _, command in ipairs(commands) do
     assert(not command:match("lipc%-hash%-prop"),
         "1,000 periodic checkpoints must publish zero shelf actions")
 end
+
+-- Explicit shelf choices use all three actions exposed by this firmware's
+-- native KAF handler. A manual action succeeds only when its response reports
+-- that exact shelf; `goodread_reading` must never satisfy `goodread_read`.
+local ACTION_WANT_TO_READ = "com.amazon.home.actions.goodread_want_to_read"
+local ACTION_READING = "com.amazon.home.actions.goodread_reading"
+local ACTION_READ = "com.amazon.home.actions.goodread_read"
+local shelf_plugin = newPlugin(settings({ enabled = true }))
+shelf_plugin.ui = reader
+local shelf_response = ACTION_WANT_TO_READ
+local shelf_commands = {}
+local shelf_original_popen = io.popen
+io.popen = function(command)
+    table.insert(shelf_commands, command)
+    local response = shelf_response
+    return {
+        read = function(_, mode)
+            assert(mode == "*a")
+            return "{response_status = " .. response .. "}"
+        end,
+        close = function() return true end,
+    }
+end
+
+assert(shelf_plugin:setCurrentBookShelf(ACTION_WANT_TO_READ),
+    "Want to Read must be available through the native shelf selector")
+assert(#shelf_commands == 1
+        and shelf_commands[1]:match("goodread_want_to_read"),
+    "manual shelf selection must issue the firmware-supported native action")
+assert(shelf_plugin.settings.manual_shelf_overrides.B0FLB24198.action
+        == ACTION_WANT_TO_READ,
+    "a confirmed explicit shelf choice must survive later checkpoints")
+
+commands = {}
+assert(shelf_plugin:syncCapturedCheckpoint(
+    "B0FLB24198", 0.46, "reading", "periodic", "test"))
+assert(#commands == 0,
+    "unchanged Want to Read must suppress contradictory percentage traffic")
+assert(shelf_plugin.last_checkpoint.shelf_action == "want_to_read",
+    "checkpoint diagnostics must distinguish Want to Read")
+
+commands = {}
+assert(shelf_plugin:syncCapturedCheckpoint(
+    "B0FLB24198", 0.47, "reading", "periodic", "test"))
+assert(#commands == 2
+        and commands[1]:match("goodread_reading")
+        and commands[2]:match("sync%-progress B0FLB24198 47"),
+    "new progress must consume the override and resume shelf/percentage sync")
+assert(shelf_plugin.settings.manual_shelf_overrides.B0FLB24198 == nil,
+    "a resumed-reading checkpoint must clear the stale explicit override")
+
+local previous_sync = shelf_plugin.last_sync
+shelf_response = ACTION_READING
+local mismatch_ok, mismatch_detail = shelf_plugin:syncAsin(
+    "B0FLB24198", ACTION_READ, 0.47, true, "test")
+assert(not mismatch_ok and mismatch_detail:match("did not confirm"),
+    "manual shelf writes must fail when native readback reports another shelf")
+assert(shelf_plugin.last_sync == previous_sync,
+    "an unconfirmed manual shelf write must not create a success receipt")
+
+shelf_response = ACTION_READ
+assert(shelf_plugin:setCurrentBookShelf(ACTION_READ),
+    "an exact native Read response must be accepted")
+assert(shelf_plugin.settings.last_completed_asin == "B0FLB24198",
+    "an explicit Read choice must enable the existing rating action")
+assert(shelf_plugin.settings.manual_shelf_overrides.B0FLB24198.action
+        == ACTION_READ,
+    "an explicit Read choice must not be overwritten at unchanged progress")
+
+live_percent = 0
+shelf_response = ACTION_READING
+assert(shelf_plugin:setCurrentBookShelf(ACTION_READING),
+    "Currently Reading must be selectable before percentage progress exists")
+commands = {}
+assert(shelf_plugin:syncCapturedCheckpoint(
+    "B0FLB24198", 0, "reading", "periodic", "test"))
+assert(#commands == 0,
+    "a zero-percent shelf override must not create a failing progress request")
+live_percent = 0.46
+
+local unsupported_ok = shelf_plugin:syncAsin(
+    "B0FLB24198", "unsupported", 0.47, true, "test")
+assert(not unsupported_ok, "unknown native shelf actions must fail closed")
+
+local shelf_execute = os.execute
+os.execute = function() return 1 end
+local queue_failure_plugin = newPlugin(settings({ enabled = true }))
+local queue_ok, queue_detail = queue_failure_plugin:syncAsin(
+    "B0FLB24198", ACTION_READING, 0.47, false, "test")
+assert(not queue_ok and queue_detail:match("could not be queued"),
+    "a failed background process launch must not be reported as queued")
+assert(queue_failure_plugin.last_sync == nil,
+    "a failed process launch must not create a local success receipt")
+os.execute = shelf_execute
+
+local shelf_menu = {}
+shelf_plugin:addToMainMenu(shelf_menu)
+local selector
+for _, item in ipairs(shelf_menu.goodreads_native.sub_item_table) do
+    if item.text == "Set Goodreads shelf…" then selector = item break end
+end
+assert(selector and #selector.sub_item_table == 3,
+    "the menu must expose exactly the three firmware-supported shelves")
+
+io.popen = shelf_original_popen
 
 -- ReadHistory reopens converted Kindle books by their cache path after a
 -- restart. Resolve the sanitized cc.db UUID through kindle.koplugin's loaded
