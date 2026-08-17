@@ -11,8 +11,17 @@ annotation_agent_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-
 annotation_export_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-export-agent-v3.jar"
 launcher_class="$project_root/goodreads.koplugin/bin/classes/AttachLauncher.class"
 
-javac_bin="${JAVAC:-javac}"
-jar_bin="${JAR:-jar}"
+# shellcheck source=java-toolchain.sh
+source "$project_root/scripts/java-toolchain.sh"
+javac_bin="$(goodreads_find_java_tool "${JAVAC:-}" javac)" || {
+    printf 'error: a working JDK is required (set JAVAC or JAVA_HOME)\n' >&2
+    exit 1
+}
+jar_bin="${JAR:-$(dirname "$javac_bin")/jar}"
+[ -x "$jar_bin" ] || {
+    printf 'error: the selected JDK has no jar tool (set JAR)\n' >&2
+    exit 1
+}
 
 rm -rf "$build_dir"
 mkdir -p "$classes_dir" "$(dirname "$agent_jar")" "$(dirname "$launcher_class")"

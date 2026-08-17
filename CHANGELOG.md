@@ -3,6 +3,64 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] - 2026-08-17
+
+### Added
+
+- Private local start/finish dates and separate first-read, reread, and manual
+  reading sessions for ASIN-backed books.
+- Explicit local DNF, undo DNF, and start-reread actions under **Private
+  reading history**. DNF never changes the native Goodreads shelf.
+- Local reading streak, pace, projected-finish, completion, reread, and DNF
+  statistics plus annual completion goals.
+- Explicit CSV and JSON history export containing only ASINs, lifecycle
+  timestamps, outcomes, percentages, and reading-day keys.
+
+### Changed
+
+- Ninety-nine percent remains Currently Reading. A book becomes Read only from
+  KOReader's explicit complete status or the manual native Read action.
+- A confirmed manual Read completes the current local session; a confirmed
+  manual Currently Reading action starts or resumes an active session.
+- Build and check scripts now verify that Java tools actually run and discover
+  common Homebrew JDK paths, bypassing macOS's nonfunctional Java placeholders.
+
+### Safety
+
+- Lifecycle state is bounded, strictly parsed, sequence numbered, SHA-256
+  protected, atomically replaced under `/var/local`, and recovered from one
+  previous valid copy after interrupted writes.
+- A lock serializes file-manager and reader instances. Stale locks recover,
+  narrowly named interrupted temporary files are removed on the next write,
+  and two invalid state copies fail closed without overwrite.
+- Stale-lock recovery is itself serialized. Missing, oversized, FIFO, and
+  symlink lock owners are never opened as trusted owner records, so malformed
+  lock state cannot block the KOReader UI.
+- Checksum inputs, lifecycle replacements, and user exports use exclusive,
+  mode-0600 random temporary files. Package preflight rejects symlinks and all
+  primary, backup, or suffixed private-history artifacts.
+- Release archives use sorted file input with host-specific ZIP metadata
+  removed, so unchanged plugin source reproduces the same checksum while
+  retaining executable helper modes.
+- Repeating Read is idempotent even if the current page changed; it cannot
+  invent another completion. Rereads become separate active sessions first.
+- The native firmware bridge is still canonical only for Want to Read,
+  Currently Reading, Read, progress, and ratings. Local DNF, lifecycle dates,
+  rereads, statistics, goals, and exports are never reported as Goodreads
+  cloud fields.
+- Private state and user-created history exports are explicitly excluded from
+  release packages.
+
+### Tests
+
+- Added 99%-versus-complete integration coverage, codec and bounds tests,
+  1,000 same-day checkpoints, 32 rereads, active/stale lock behavior, every
+  atomic-write interruption boundary, checksum corruption, backup recovery,
+  failed-closed dual corruption, export privacy, and mode-0600 verification.
+- Added FIFO/symlink nonblocking probes, 24-writer normal concurrency and
+  64-writer release stress, stale-lock contention, parser-amplification bounds,
+  and clean/suffixed-private/symlink package fixtures.
+
 ## [0.10.0] - 2026-08-17
 
 ### Added

@@ -70,6 +70,11 @@ end
 package.preload["shelfstate"] = function()
     return assert(dofile(project_root .. "/goodreads.koplugin/shelfstate.lua"))
 end
+local TestReadingHistory = assert(dofile(
+    project_root .. "/goodreads.koplugin/readinghistory.lua"))
+package.preload["readinghistory"] = function()
+    return TestReadingHistory
+end
 
 local ReaderUI = {
     onClose = function(reader)
@@ -94,7 +99,7 @@ G_reader_settings = {
 local Goodreads = assert(dofile(project_root .. "/goodreads.koplugin/main.lua"))
 
 local function newPlugin(settings)
-    return setmetatable({
+    local plugin = setmetatable({
         settings = settings,
         last_sync = nil,
         last_progress_sync = nil,
@@ -110,12 +115,17 @@ local function newPlugin(settings)
         annotation_sync_inflight = nil,
         annotation_pending_snapshots = {},
         annotation_pending_order = {},
+        reading_history = TestReadingHistory.new(),
         persistAnnotationOutbox = function(_, snapshot)
             snapshot.sequence = snapshot.token
             snapshot.outbox_checksum = string.rep("a", 64)
             return true
         end,
     }, { __index = Goodreads })
+    plugin.updateReadingHistory = function(self, operation)
+        return operation(self.reading_history)
+    end
+    return plugin
 end
 
 local function settings(overrides)
@@ -215,6 +225,28 @@ for _, command in ipairs(commands) do
         "1,000 periodic checkpoints must publish zero shelf actions")
 end
 
+-- A position is not a completion signal. Ninety-nine percent remains an
+-- active local session and Currently Reading shelf action until KOReader
+-- supplies its explicit complete status.
+local completion_plugin = newPlugin(settings({ enabled = true }))
+commands = {}
+assert(completion_plugin:syncCapturedCheckpoint(
+    "B0FLB24198", 0.99, "reading", "reader_ready", "test"))
+assert(commands[1] and commands[1]:match("goodread_reading")
+        and not commands[1]:match("goodread_read[^i]"),
+    "99 percent must remain Currently Reading")
+assert(completion_plugin.reading_history.books.B0FLB24198.sessions[1].outcome
+        == "active",
+    "99 percent must remain an active local lifecycle")
+commands = {}
+assert(completion_plugin:syncCapturedCheckpoint(
+    "B0FLB24198", 0.99, "complete", "close", "test"))
+assert(commands[1] and commands[1]:match("goodread_read"),
+    "explicit completion must publish Read")
+assert(completion_plugin.reading_history.books.B0FLB24198.sessions[1].outcome
+        == "completed",
+    "explicit completion must finish the local lifecycle")
+
 -- Explicit shelf choices use all three actions exposed by this firmware's
 -- native KAF handler. A manual action succeeds only when its response reports
 -- that exact shelf; `goodread_reading` must never satisfy `goodread_read`.
@@ -282,16 +314,42 @@ assert(shelf_plugin.settings.last_completed_asin == "B0FLB24198",
 assert(shelf_plugin.settings.manual_shelf_overrides.B0FLB24198.action
         == ACTION_READ,
     "an explicit Read choice must not be overwritten at unchanged progress")
+assert(shelf_plugin.reading_history.books.B0FLB24198.sessions[1].outcome
+        == "completed",
+    "a confirmed manual Read shelf must complete the local session")
 
 live_percent = 0
 shelf_response = ACTION_READING
 assert(shelf_plugin:setCurrentBookShelf(ACTION_READING),
     "Currently Reading must be selectable before percentage progress exists")
+assert(#shelf_plugin.reading_history.books.B0FLB24198.sessions == 2
+        and shelf_plugin.reading_history.books.B0FLB24198.sessions[2].reason
+            == "manual"
+        and shelf_plugin.reading_history.books.B0FLB24198.sessions[2].outcome
+            == "active",
+    "Currently Reading after completion must start a separate local reread")
 commands = {}
 assert(shelf_plugin:syncCapturedCheckpoint(
     "B0FLB24198", 0, "reading", "periodic", "test"))
 assert(#commands == 0,
     "a zero-percent shelf override must not create a failing progress request")
+assert(shelf_plugin:markCurrentBookDnf(),
+    "the menu action must mark the active local session DNF")
+assert(shelf_plugin.reading_history.books.B0FLB24198.sessions[2].outcome
+        == "dnf")
+assert(shelf_plugin:undoCurrentBookDnf(),
+    "the menu action must undo DNF on the same local session")
+assert(shelf_plugin.reading_history.books.B0FLB24198.sessions[2].outcome
+        == "active")
+assert(shelf_plugin:markCurrentBookDnf())
+assert(shelf_plugin:startCurrentBookReread(),
+    "the menu action must start a separate local reread")
+assert(#shelf_plugin.reading_history.books.B0FLB24198.sessions == 3
+        and shelf_plugin.reading_history.books.B0FLB24198.sessions[3].outcome
+            == "active")
+assert(shelf_plugin:setAnnualReadingGoal(24))
+assert(shelf_plugin:getAnnualReadingGoal() == 24,
+    "the annual-goal menu must read back its local value")
 live_percent = 0.46
 
 local unsupported_ok = shelf_plugin:syncAsin(
@@ -312,11 +370,20 @@ os.execute = shelf_execute
 local shelf_menu = {}
 shelf_plugin:addToMainMenu(shelf_menu)
 local selector
+local private_history_menu
 for _, item in ipairs(shelf_menu.goodreads_native.sub_item_table) do
     if item.text == "Set Goodreads shelf…" then selector = item break end
 end
 assert(selector and #selector.sub_item_table == 3,
     "the menu must expose exactly the three firmware-supported shelves")
+for _, item in ipairs(shelf_menu.goodreads_native.sub_item_table) do
+    if item.text == "Private reading history" then
+        private_history_menu = item
+        break
+    end
+end
+assert(private_history_menu and #private_history_menu.sub_item_table == 6,
+    "the private-history menu must expose stats, DNF, reread, goal, and export")
 
 io.popen = shelf_original_popen
 
@@ -1424,6 +1491,237 @@ assert(resumed[1].desired[1].finish == storage_snapshot.desired[1].finish,
     "restart must resume the newest user intent")
 io.open = resume_original_open
 io.popen = resume_original_popen
+
+-- Exercise the private lifecycle store through real filesystem operations.
+-- Every injected interruption must recover to either the old complete state
+-- or the newly committed complete state; a checksum failure must never be
+-- silently overwritten.
+do
+local function exerciseReadingHistoryStorage()
+local history_file = private_root .. "/reading-history-v1"
+local history_backup = history_file .. ".bak"
+local history_corrupt = history_file .. ".corrupt"
+local history_lock = assert(os.getenv("GOODREADS_HISTORY_LOCK"))
+local history_export_dir = assert(os.getenv("GOODREADS_HISTORY_EXPORT_DIR"))
+local history_asin = "B000000003"
+local function historyAt(day)
+    return assert(os.time({
+        year = 2026,
+        month = 2,
+        day = day,
+        hour = 12,
+        min = 0,
+        sec = 0,
+    }))
+end
+local function readAll(path)
+    local file = assert(io.open(path, "rb"))
+    local content = assert(file:read("*a"))
+    file:close()
+    return content
+end
+local function removeHistoryLock()
+    os.remove(history_lock .. "/owner")
+    os.execute("rmdir " .. history_lock .. " >/dev/null 2>&1")
+end
+local history_plugin = setmetatable({
+    settings = settings(),
+    reading_history_fault_stage = nil,
+}, { __index = Goodreads })
+removeHistoryLock()
+assert(history_plugin:reloadReadingHistory())
+assert(history_plugin.reading_history_source == "new")
+
+local history_changed = history_plugin:updateReadingHistory(function(state)
+    return TestReadingHistory.record(
+        state, history_asin, 0.10, "reading", historyAt(1))
+end)
+assert(history_changed, "the first lifecycle checkpoint must commit")
+assert(history_plugin.reading_history.sequence == 1)
+local history_mode_pipe = assert(io.popen(
+    "LC_ALL=C /bin/ls -l " .. history_file, "r"))
+local history_mode = assert(history_mode_pipe:read("*l"))
+history_mode_pipe:close()
+assert(history_mode:sub(1, 10) == "-rw-------",
+    "private lifecycle state must be mode 0600")
+local history_content = readAll(history_file)
+local history_body = assert(TestReadingHistory.split(history_content))
+assert(TestReadingHistory.parse(history_body),
+    "committed lifecycle state must have a valid envelope")
+
+local complete_write_open = io.open
+io.open = function(path, mode)
+    if path:match("reading%-history%-v1%.tmp%.") and mode == "wb" then
+        local underlying = assert(complete_write_open(path, mode))
+        return {
+            write = function(_, content)
+                underlying:write(content:sub(1, math.max(1, #content - 8)))
+                return nil, "injected short write"
+            end,
+            close = function() return underlying:close() end,
+        }
+    end
+    return complete_write_open(path, mode)
+end
+local short_write_ok = history_plugin:updateReadingHistory(function(state)
+    return TestReadingHistory.record(
+        state, history_asin, 0.15, "reading", historyAt(2))
+end)
+io.open = complete_write_open
+assert(not short_write_ok, "a short lifecycle write must not commit")
+assert(history_plugin:reloadReadingHistory())
+assert(history_plugin.reading_history.sequence == 1
+        and history_plugin.reading_history.books[history_asin]
+            .sessions[1].last_bp == 1000,
+    "short writes must preserve the complete prior lifecycle")
+
+os.execute("mkdir " .. history_lock)
+local missing_owner_called = false
+local missing_owner_ok, missing_owner_detail =
+    history_plugin:updateReadingHistory(function()
+        missing_owner_called = true
+        return true
+    end)
+assert(not missing_owner_ok and not missing_owner_called
+        and missing_owner_detail == "reading history is busy",
+    "a lock without its owner file must not be stolen during publication")
+local missing_owner_file = io.open(history_lock .. "/owner", "rb")
+assert(not missing_owner_file,
+    "observing an ownerless lock must not publish or overwrite an owner")
+removeHistoryLock()
+
+os.execute("mkdir " .. history_lock)
+local lock_owner = assert(io.open(history_lock .. "/owner", "w"))
+lock_owner:write(tostring(os.time()), "\n")
+lock_owner:close()
+local active_lock_ok, active_lock_detail =
+    history_plugin:updateReadingHistory(function()
+        error("an active lock must prevent the operation")
+    end)
+assert(not active_lock_ok and active_lock_detail == "reading history is busy")
+removeHistoryLock()
+
+os.execute("mkdir " .. history_lock)
+lock_owner = assert(io.open(history_lock .. "/owner", "w"))
+lock_owner:write(tostring(os.time() - 121), "\n")
+lock_owner:close()
+assert(history_plugin:updateReadingHistory(function(state)
+    return TestReadingHistory.record(
+        state, history_asin, 0.20, "reading", historyAt(2))
+end), "a stale lifecycle lock must recover")
+assert(history_plugin.reading_history.sequence == 2)
+
+for _, stage in ipairs({
+    "after_body_write",
+    "after_checksum",
+    "after_envelope_write",
+}) do
+    history_plugin.reading_history_fault_stage = stage
+    assert(not history_plugin:updateReadingHistory(function(state)
+        return TestReadingHistory.record(
+            state, history_asin, 0.30, "reading", historyAt(3))
+    end), "fault stage must interrupt lifecycle persistence: " .. stage)
+    history_plugin.reading_history_fault_stage = nil
+    assert(history_plugin:reloadReadingHistory())
+    assert(history_plugin.reading_history.sequence == 2,
+        "pre-commit interruption must preserve the prior lifecycle")
+end
+
+history_plugin.reading_history_fault_stage = "after_backup_rotation"
+assert(not history_plugin:updateReadingHistory(function(state)
+    return TestReadingHistory.record(
+        state, history_asin, 0.30, "reading", historyAt(3))
+end), "backup-rotation interruption must be reported")
+history_plugin.reading_history_fault_stage = nil
+assert(history_plugin:reloadReadingHistory())
+assert(history_plugin.reading_history_source == "backup"
+        and history_plugin.reading_history.sequence == 2,
+    "a rotated backup must recover when the primary is absent")
+assert(history_plugin:updateReadingHistory(function(state)
+    return TestReadingHistory.record(
+        state, history_asin, 0.30, "reading", historyAt(3))
+end), "the recovered backup must accept the next checkpoint")
+assert(history_plugin.reading_history.sequence == 3)
+
+history_plugin.reading_history_fault_stage = "after_history_commit"
+assert(not history_plugin:updateReadingHistory(function(state)
+    return TestReadingHistory.record(
+        state, history_asin, 0.40, "reading", historyAt(4))
+end), "post-commit interruption must be reported conservatively")
+history_plugin.reading_history_fault_stage = nil
+assert(history_plugin:reloadReadingHistory())
+assert(history_plugin.reading_history_source == "primary"
+        and history_plugin.reading_history.sequence == 4
+        and history_plugin.reading_history.books[history_asin]
+            .sessions[1].last_bp == 4000,
+    "restart must observe the complete post-commit lifecycle")
+
+local temp_listing = assert(io.popen(
+    "LC_ALL=C /bin/ls -1 " .. private_root, "r"))
+for name in temp_listing:lines() do
+    assert(not name:match("^reading%-history%-v1%.tmp%."),
+        "the next locked write must clean interrupted lifecycle temporaries")
+end
+temp_listing:close()
+
+assert(history_plugin:exportReadingHistory(),
+    "private lifecycle exports must be written atomically")
+local history_json = readAll(
+    history_export_dir .. "/goodreads_reading_history.json")
+local history_csv = readAll(
+    history_export_dir .. "/goodreads_reading_history.csv")
+assert(history_json:match('^%{"version":1')
+        and history_json:find(history_asin, 1, true)
+        and history_csv:match("^asin,session_ordinal"),
+    "private lifecycle exports must be structured and complete")
+for _, forbidden in ipairs({ "title", "author", "path", "highlight", "note" }) do
+    assert(not history_json:lower():find(forbidden, 1, true)
+            and not history_csv:lower():find(forbidden, 1, true),
+        "private lifecycle exports must exclude " .. forbidden)
+end
+
+local corrupt_primary = assert(io.open(history_file, "w"))
+corrupt_primary:write("invalid primary\n")
+corrupt_primary:close()
+assert(history_plugin:reloadReadingHistory())
+assert(history_plugin.reading_history_source == "backup"
+        and history_plugin.reading_history.sequence == 3,
+    "a corrupt primary must recover from the last valid backup")
+assert(history_plugin:updateReadingHistory(function(state)
+    return TestReadingHistory.record(
+        state, history_asin, 0.50, "reading", historyAt(5))
+end), "backup recovery must commit a new primary")
+local quarantined_history = assert(io.open(history_corrupt, "rb"),
+    "the invalid primary must be quarantined for diagnosis")
+quarantined_history:close()
+assert(history_plugin:reloadReadingHistory())
+assert(history_plugin.reading_history_source == "primary"
+        and history_plugin.reading_history.sequence == 4)
+
+local invalid_primary = assert(io.open(history_file, "w"))
+invalid_primary:write("invalid primary\n")
+invalid_primary:close()
+local invalid_backup = assert(io.open(history_backup, "w"))
+invalid_backup:write("invalid backup\n")
+invalid_backup:close()
+local invalid_primary_before = readAll(history_file)
+local invalid_backup_before = readAll(history_backup)
+assert(not history_plugin:reloadReadingHistory(),
+    "two invalid lifecycle copies must fail closed")
+local operation_called = false
+local invalid_write_ok = history_plugin:updateReadingHistory(function()
+    operation_called = true
+    return true
+end)
+assert(not invalid_write_ok and not operation_called,
+    "invalid lifecycle state must not be overwritten by a new operation")
+assert(readAll(history_file) == invalid_primary_before
+        and readAll(history_backup) == invalid_backup_before,
+    "failed-closed lifecycle files must remain unchanged")
+removeHistoryLock()
+end
+exerciseReadingHistoryStorage()
+end
 
 os.execute = original_execute
 

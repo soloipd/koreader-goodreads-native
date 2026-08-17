@@ -14,7 +14,9 @@ flowchart LR
     G --> H["Authenticated GrokService"]
     H --> I["Goodreads whole-number percentage"]
     I --> J["Persist last successful percent per ASIN"]
-    B --> K["Completion detected"]
+    B --> O["Checksummed local lifecycle checkpoint"]
+    O --> P["Private sessions, DNF, stats, goals, and export"]
+    B --> K["Explicit KOReader completion"]
     K --> L["Explicit 1–5 star chooser"]
     L --> M["Grok rateABook LIPC property"]
     M --> N["Goodreads rating"]
@@ -30,7 +32,7 @@ handler unloads the document, then queues:
 - the shelf action after one second;
 - the percentage helper after three seconds;
 - a one-time rating chooser after returning to the file browser when the book
-  is complete.
+  has KOReader's explicit complete status.
 
 The close hook resolves `reader.goodreads_native`, the active ReaderUI plugin
 instance, rather than retaining the FileManager instance that installed the
@@ -91,6 +93,37 @@ the integer written to
 
 Before attachment, the plugin checks that state file and suppresses an already
 accepted whole-number percentage.
+
+## Private reading lifecycle
+
+`readinghistory.lua` is a local state machine independent of Goodreads cloud
+delivery. It tracks bounded first-read, reread, completed, and DNF sessions;
+reading-day keys; and annual goals. Ninety-nine percent remains active. Only
+KOReader's explicit complete status or a confirmed manual Read shelf action
+can complete a session, and repeating Read is idempotent.
+
+The deterministic state envelope carries a monotonic sequence and SHA-256.
+Writes take a single-instance lock whose stale reaper is separately serialized.
+Owner records and lifecycle inputs must be bounded regular non-symlink files;
+missing, oversized, FIFO, or symlink owners are treated as busy or stale based
+on the lock directory timestamp and are never opened as streams. Writes remove
+only narrowly named interrupted temporaries, create replacements exclusively
+with mode 0600, rotate one valid backup, and atomically rename a complete new
+primary under `/var/local/koreader-goodreads-native`. A corrupt primary falls
+back to the backup. If both are invalid, updates fail closed and preserve both
+files.
+
+State contains ASINs, timestamps, outcomes, percentages, and day keys only.
+It excludes titles, authors, paths, annotation text, account data, device
+identifiers, and authentication material. The explicit CSV/JSON export uses
+the same constrained fields but is written under USB-visible `/mnt/us`; it is
+local and is never evidence of Goodreads cloud delivery.
+
+Firmware 5.19.5's mutable Goodreads library-book surface exposes the three
+canonical shelves and rating, while percentage uses the separate native Grok
+request. It does not expose writable DNF, lifecycle-date, reread, goal, or
+statistics fields. Those lifecycle features therefore remain deliberately
+local.
 
 ## Diagnostics and annotations
 

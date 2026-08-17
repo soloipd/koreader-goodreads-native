@@ -29,10 +29,15 @@ sha256_tool="$(command -v sha256sum || command -v shasum || true)"
 # incomplete-snapshot fail-closed behavior, retries, and idempotency.
 PROJECT_ROOT="$project_root" \
     GOODREADS_PRIVATE_STATE_DIR="$stress_root/annotation-state" \
+    GOODREADS_HISTORY_EXPORT_DIR="$stress_root/exports" \
+    GOODREADS_HISTORY_LOCK="$stress_root/history.lock" \
     GOODREADS_SHA256_TOOL="$sha256_tool" \
     "$lua_runtime" "$project_root/tests/test_main.lua"
 
 "$project_root/tests/test_lifecycle_stress.sh"
+GOODREADS_HISTORY_LOCK_WORKERS=64 \
+    "$project_root/tests/test_history_lock_stress.sh"
+"$project_root/tests/test_package_privacy.sh"
 "$project_root/tests/test_doctor.sh" --stress
 
 printf '%s\n' 'Release stress gate passed: annotation, lifecycle, doctor, concurrency, and process-selection stress.'
