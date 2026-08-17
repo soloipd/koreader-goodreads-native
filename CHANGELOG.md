@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
-## [0.11.0] - 2026-08-17
+## [0.11.1] - 2026-08-17
 
 ### Fixed
 
@@ -28,6 +28,14 @@ All notable changes to this project are documented here. The project follows
   import-first reconciliation twice with short backoff. Invalid snapshots and
   rejected coordinates still fail immediately, and retries remain latest-book
   scoped so they cannot run after the reader changes books.
+
+### Tests
+
+- Added source-entry versus unique-native-range diagnostics, delivery-contract
+  regressions, deterministic agent checks, blocked-TERM recovery, stale-lock
+  takeover, 1,000 handoffs, and 50 simultaneous watcher starters.
+
+## [0.11.0] - 2026-08-17
 
 ### Added
 
