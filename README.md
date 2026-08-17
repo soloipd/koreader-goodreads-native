@@ -276,6 +276,49 @@ device suspends or resumes, the book closes, or the manual sync action runs.
 Requests are processed one at a time, and newer changes replace stale queued
 snapshots for the same book.
 
+### Recommended KOReader workflow
+
+For dependable outbound synchronization, treat the mapped KOReader book as the
+source of truth. Make each change once in KOReader and allow it to reconcile
+before changing the same annotation in the native Kindle reader. Amazon
+Notebook is a downstream destination; this plugin does not import changes
+directly from the website.
+
+To create a highlight or note:
+
+1. Select the text and create the highlight in KOReader.
+2. Add a note to that existing highlight, if wanted, and save it.
+3. Continue reading normally. The annotation-change hook schedules the newest
+   complete snapshot; closing the book is not required.
+
+To edit an annotation, edit the note attached to the existing highlight and
+save it. Removing only the note keeps the highlight. To change the selected
+text range, delete the old highlight and create a new one; rapid consecutive
+changes are serialized and the newest complete snapshot replaces stale queued
+work.
+
+To delete an annotation, delete the highlight in KOReader. Its attached note is
+deleted with it. Do not repeat the deletion in the native reader or Amazon
+Notebook while the KOReader change is pending.
+
+To check delivery, open **Main menu → Tools → More tools → Goodreads (native
+Kindle sync) → Show sync diagnostics**:
+
+- **waiting for native reader** means the newest snapshot is safely queued.
+  Open the exact downloaded local Kindle copy once and let the book finish
+  loading; the low-power listener will retry automatically. A cloud-only
+  placeholder with the same ASIN is intentionally ignored.
+- **queued to Amazon** means the local Kindle store was verified, the supported
+  native journal was written, and an Amazon upload was requested. Amazon
+  Notebook can still take time to display the change.
+- **verified unchanged** means the native store already matched the requested
+  snapshot, so no duplicate cloud write or queue wake was needed.
+
+**Sync current book now** is a recovery nudge, not a required step after every
+change. Select it once if needed; repeated taps are unnecessary. Open, close,
+suspend, and resume remain additional safety checkpoints, and durable pending
+work survives KOReader exit, sleep, framework restart, and reboot.
+
 ### When the native Kindle book is closed
 
 This firmware cannot reliably apply annotations through a detached background
