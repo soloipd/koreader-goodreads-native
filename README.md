@@ -303,19 +303,20 @@ Enable **Import native Kindle highlights (experimental)** under **Tools →
 Goodreads (native Kindle sync)**. Open or resume the local book once in the
 native Kindle reader. A low-power watcher captures its current annotation
 snapshot while ReaderSDK owns the exact local book. When the mapped converted
-book next opens or resumes in KOReader, `kindle.koplugin` v0.0.7 reverse-
-translates the native ranges in a detached batch.
+book next opens or resumes in KOReader, `kindle.koplugin` v0.0.7 or newer
+reverse-translates the native ranges in a detached batch.
 
-The v2 exporter writes `snapshot_complete=true` only after the full bounded
+The v3 exporter writes `snapshot_complete=true` only after the full bounded
 native list has been enumerated, validated, and serialized. Missing or
 incomplete snapshots cannot remove a KOReader highlight or note, or acknowledge
 a pending deletion tombstone.
 
-Version 0.8 records component-level provenance in KOReader's own annotation
-metadata. Missing native highlights are created as native-owned. If a native
-note fills an existing KOReader highlight, only the note is native-owned; the
-highlight remains local. Later complete snapshots can apply native note edits,
-note removal, and deletion of an unchanged native-created highlight.
+The provenance-aware importer records component-level ownership in KOReader's
+own annotation metadata. Missing native highlights are created as native-owned.
+If a native note fills an existing KOReader highlight, only the note is
+native-owned; the highlight remains local. Later complete snapshots can apply
+native note edits, note removal, and deletion of an unchanged native-created
+highlight.
 
 Local work always wins. Editing or removing an imported note is never undone by
 a stale native snapshot and protects the highlight from deletion. If Kindle
