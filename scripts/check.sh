@@ -5,7 +5,7 @@ set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 plugin_dir="$project_root/goodreads.koplugin"
 agent_jar="$plugin_dir/bin/goodreads-progress-agent-v2.jar"
-annotation_agent_jar="$plugin_dir/bin/goodreads-annotation-agent-v29.jar"
+annotation_agent_jar="$plugin_dir/bin/goodreads-annotation-agent-v30.jar"
 annotation_export_jar="$plugin_dir/bin/goodreads-annotation-export-agent-v3.jar"
 
 sh -n "$plugin_dir/bin/sync-progress"
@@ -33,8 +33,10 @@ grep -Fq 'write_receipt saved_locally' "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: annotation sync does not persist its local-save receipt\n' >&2; exit 1; }
 grep -Fq 'write_receipt waiting_native' "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: inactive annotation sync does not persist its waiting receipt\n' >&2; exit 1; }
-grep -Fq 'write_receipt queued_amazon' "$plugin_dir/bin/sync-annotations" \
-    || { printf 'error: accepted annotation sync does not persist its queue receipt\n' >&2; exit 1; }
+grep -Fq 'receipt_state="queued_amazon"' "$plugin_dir/bin/sync-annotations" \
+    && grep -Fq 'receipt_state="verified_unchanged"' "$plugin_dir/bin/sync-annotations" \
+    && grep -Fq 'write_receipt "$receipt_state"' "$plugin_dir/bin/sync-annotations" \
+    || { printf 'error: accepted annotation sync does not distinguish queued and unchanged receipts\n' >&2; exit 1; }
 grep -Fq "'cloud_observed=unavailable'" "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: upload acceptance may be mislabeled as cloud observation\n' >&2; exit 1; }
 grep -Fq '"$WATCHER" --once "$2"' "$plugin_dir/bin/manage-sync-receipts" \
@@ -93,15 +95,18 @@ grep -Fq "grep -Fqx 'local_verified=true'" "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: unverified native annotations may be queued\n' >&2; exit 1; }
 grep -Fq "grep -Fqx 'native_notified=true'" "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: annotations not sent to KPP/KSDK may be queued\n' >&2; exit 1; }
-grep -Fq "grep -Eq '^ksdk_synced=(true|unavailable)$'" "$plugin_dir/bin/sync-annotations" \
-    || { printf 'error: annotations not dual-written to KSDK may be queued\n' >&2; exit 1; }
+grep -Fq "grep -Fqx 'ksdk_synced=true'" "$plugin_dir/bin/sync-annotations" \
+    && grep -Fq "grep -Fqx 'ksdk_synced=unavailable'" "$plugin_dir/bin/sync-annotations" \
+    || { printf 'error: queued and unchanged KSDK states are not distinguished\n' >&2; exit 1; }
 grep -Fq "grep -Fqx 'native_cloud_queued=true'" "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: annotations without a native cloud queue may be accepted\n' >&2; exit 1; }
-grep -Fq "grep -Eq '^legacy_journaled=(true|unavailable)$'" "$plugin_dir/bin/sync-annotations" \
-    || { printf 'error: legacy journaling status is not validated\n' >&2; exit 1; }
-grep -Fq "grep -Eq '^cloud_snapshot_synced=(true|unavailable)$'" "$plugin_dir/bin/sync-annotations" \
-    || { printf 'error: firmware-specific snapshot status is not validated\n' >&2; exit 1; }
-grep -Fq "grep -Eq '^agent_generation=(18|19|20|21|22|23|24|25|26|27|28|29)$'" "$plugin_dir/bin/sync-annotations" \
+grep -Fq "grep -Fqx 'legacy_journaled=true'" "$plugin_dir/bin/sync-annotations" \
+    && grep -Fq "grep -Fqx 'legacy_journaled=unavailable'" "$plugin_dir/bin/sync-annotations" \
+    || { printf 'error: queued and unchanged legacy journal states are not distinguished\n' >&2; exit 1; }
+grep -Fq "grep -Fqx 'cloud_snapshot_synced=true'" "$plugin_dir/bin/sync-annotations" \
+    && grep -Fq "grep -Fqx 'cloud_snapshot_synced=unavailable'" "$plugin_dir/bin/sync-annotations" \
+    || { printf 'error: queued and unchanged snapshot states are not distinguished\n' >&2; exit 1; }
+grep -Fq "grep -Eq '^agent_generation=(18|19|20|21|22|23|24|25|26|27|28|29|30)$'" "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: completed legacy migration is not preserved across agent upgrades\n' >&2; exit 1; }
 grep -Fq 'failed_stage=wait_for_active_book' "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: inactive native-book requests are not queued for replay\n' >&2; exit 1; }
@@ -127,6 +132,7 @@ if command -v shellcheck >/dev/null 2>&1; then
         "$plugin_dir/bin/sync-rating" \
         "$plugin_dir/bin/sync-annotations" \
         "$plugin_dir/bin/exit-koreader-after-native-handoff" \
+        "$plugin_dir/bin/watch-native-annotations" \
         "$plugin_dir/bin/watch-pending-annotations" \
         "$plugin_dir/bin/manage-sync-receipts" \
         "$plugin_dir/bin/acknowledge-annotation-outbox" \
@@ -230,15 +236,15 @@ grep -Fqx 'GoodreadsProgressAgentV2.class' <<<"$progress_entries" \
     || { printf 'error: agent JAR lacks its main class\n' >&2; exit 1; }
 grep -Fqx 'GoodreadsProgressAgentV2$RequestArguments.class' <<<"$progress_entries" \
     || { printf 'error: agent JAR lacks its argument parser class\n' >&2; exit 1; }
-grep -Fqx 'Agent-Class: GoodreadsAnnotationAgentV29' <<<"$annotation_manifest" \
+grep -Fqx 'Agent-Class: GoodreadsAnnotationAgentV30' <<<"$annotation_manifest" \
     || { printf 'error: annotation agent manifest is invalid\n' >&2; exit 1; }
-grep -Fqx 'GoodreadsAnnotationAgentV29.class' <<<"$annotation_entries" \
+grep -Fqx 'GoodreadsAnnotationAgentV30.class' <<<"$annotation_entries" \
     || { printf 'error: annotation agent JAR lacks its main class\n' >&2; exit 1; }
-grep -Fqx 'GoodreadsAnnotationAgentV29$CloudAnnotationHandler.class' <<<"$annotation_entries" \
+grep -Fqx 'GoodreadsAnnotationAgentV30$CloudAnnotationHandler.class' <<<"$annotation_entries" \
     || { printf 'error: annotation agent JAR lacks its cloud proxy handler\n' >&2; exit 1; }
-grep -Fqx 'GoodreadsAnnotationAgentV29$RangeIdentity.class' <<<"$annotation_entries" \
+grep -Fqx 'GoodreadsAnnotationAgentV30$RangeIdentity.class' <<<"$annotation_entries" \
     || { printf 'error: annotation agent JAR lacks exact range identities\n' >&2; exit 1; }
-grep -Fqx 'GoodreadsAnnotationAgentV29$1.class' <<<"$annotation_entries" \
+grep -Fqx 'GoodreadsAnnotationAgentV30$1.class' <<<"$annotation_entries" \
     || { printf 'error: annotation agent JAR lacks its compiler-generated access class\n' >&2; exit 1; }
 grep -Fqx 'Agent-Class: GoodreadsAnnotationExportAgentV3' <<<"$annotation_export_manifest" \
     || { printf 'error: annotation export agent manifest is invalid\n' >&2; exit 1; }
@@ -262,7 +268,7 @@ if [ -n "$javac_bin" ] && [ -n "$java_bin" ]; then
     mkdir -p "$annotation_test_dir"
     "$javac_bin" --release 8 -Xlint:-options -d "$annotation_test_dir" \
         "$project_root/agent/src/GoodreadsAnnotationAgentV3.java" \
-        "$project_root/agent/src/GoodreadsAnnotationAgentV29.java" \
+        "$project_root/agent/src/GoodreadsAnnotationAgentV30.java" \
         "$project_root/agent/src/GoodreadsAnnotationExportAgentV3.java" \
         "${annotation_test_sources[@]}"
     while IFS= read -r class_file; do
@@ -275,13 +281,13 @@ if [ -n "$javac_bin" ] && [ -n "$java_bin" ]; then
         }
         rm -f "$packaged_class"
     done < <(printf '%s\n' \
-        'GoodreadsAnnotationAgentV29.class' \
-        'GoodreadsAnnotationAgentV29$1.class' \
-        'GoodreadsAnnotationAgentV29$CloudAnnotationHandler.class' \
-        'GoodreadsAnnotationAgentV29$Record.class' \
-        'GoodreadsAnnotationAgentV29$RangeEndpoint.class' \
-        'GoodreadsAnnotationAgentV29$RangeIdentity.class' \
-        'GoodreadsAnnotationAgentV29$Counters.class')
+        'GoodreadsAnnotationAgentV30.class' \
+        'GoodreadsAnnotationAgentV30$1.class' \
+        'GoodreadsAnnotationAgentV30$CloudAnnotationHandler.class' \
+        'GoodreadsAnnotationAgentV30$Record.class' \
+        'GoodreadsAnnotationAgentV30$RangeEndpoint.class' \
+        'GoodreadsAnnotationAgentV30$RangeIdentity.class' \
+        'GoodreadsAnnotationAgentV30$Counters.class')
     while IFS= read -r class_file; do
         packaged_class="$annotation_test_dir/$class_file.packaged"
         unzip -p "$annotation_export_jar" "$class_file" >"$packaged_class"
@@ -294,7 +300,7 @@ if [ -n "$javac_bin" ] && [ -n "$java_bin" ]; then
     done < <(printf '%s\n' \
         'GoodreadsAnnotationExportAgentV3.class' \
         'GoodreadsAnnotationExportAgentV3$ExportRecord.class')
-    "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationAgentV29Test
+    "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationAgentV30Test
     "$java_bin" -cp "$annotation_test_dir" GoodreadsAnnotationExportAgentV3Test
 else
     printf 'warning: Java toolchain unavailable; annotation agent behavior tests were skipped\n' >&2
@@ -308,5 +314,26 @@ if grep -R -E -q \
     printf 'error: possible credential committed in project files\n' >&2
     exit 1
 fi
+
+jar_digest() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{ print $1 }'
+    else
+        shasum -a 256 "$1" | awk '{ print $1 }'
+    fi
+}
+jar_digests_before="$(
+    jar_digest "$agent_jar"
+    jar_digest "$annotation_agent_jar"
+    jar_digest "$annotation_export_jar"
+)"
+"$project_root/scripts/build.sh" >/dev/null 2>&1
+jar_digests_after="$(
+    jar_digest "$agent_jar"
+    jar_digest "$annotation_agent_jar"
+    jar_digest "$annotation_export_jar"
+)"
+[ "$jar_digests_before" = "$jar_digests_after" ] \
+    || { printf 'error: repeated Java-agent build is not byte-for-byte reproducible\n' >&2; exit 1; }
 
 printf 'All checks passed.\n'

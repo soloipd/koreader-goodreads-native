@@ -31,9 +31,10 @@ waiting_at=
 queued_at=
 desired_count=3
 note_count=1
+native_range_count=2
 retry_count=2
 retry_reason=wait_for_active_book
-agent_generation=29
+agent_generation=30
 trigger=close
 local_verified=false
 native_notified=false
@@ -52,6 +53,7 @@ status="$(
         "$helper" status "$asin"
 )"
 grep -Fqx 'state=saved_locally' <<<"$status"
+grep -Fqx 'native_range_count=2' <<<"$status"
 grep -Fqx 'pending_present=true' <<<"$status"
 grep -Fqx 'effective_state=waiting_native' <<<"$status"
 
@@ -289,6 +291,7 @@ test "$support_path" = "$settings_dir/goodreads_native_support.txt"
 test -s "$support_path"
 grep -Fqx '[book_001]' "$support_path"
 grep -Fqx 'pending_present=true' "$support_path"
+grep -Fqx 'native_range_count=2' "$support_path"
 if grep -Fq "$asin" "$support_path" \
     || grep -Fq 'private annotation text' "$support_path"; then
     printf 'error: support summary leaked an ASIN or annotation text\n' >&2
@@ -311,6 +314,7 @@ GOODREADS_PLUGIN_DIR="$plugin_dir" GOODREADS_SETTINGS_DIR="$settings_dir" \
 test ! -e "$pending_dir/$asin"
 grep -Fqx 'state=discarded' "$receipt_dir/$asin"
 grep -Fqx 'retry_reason=user_discarded' "$receipt_dir/$asin"
+grep -Fqx 'native_range_count=2' "$receipt_dir/$asin"
 
 private_state="$test_root/private-state"
 mkdir -p "$private_state/annotation-outbox"

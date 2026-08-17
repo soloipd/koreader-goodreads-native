@@ -16,7 +16,7 @@ import java.util.Map;
 import java.util.Properties;
 import testsupport.Fakes;
 
-public final class GoodreadsAnnotationAgentV29Test {
+public final class GoodreadsAnnotationAgentV30Test {
     private static final String ASIN = "B0FLB24198";
     private static final String START = "AAAAAAAAAAAA";
     private static final String END = "AAAAAAAAAAAB";
@@ -29,7 +29,7 @@ public final class GoodreadsAnnotationAgentV29Test {
     private static final String TERMINAL_END_NORMALIZED = "ATwFAAD3AgAA";
     private static int requestSequence = 10000000;
 
-    private GoodreadsAnnotationAgentV29Test() {}
+    private GoodreadsAnnotationAgentV30Test() {}
 
     public static void main(String[] ignored) throws Exception {
         verifyExactRangeIdentityParsing();
@@ -52,6 +52,8 @@ public final class GoodreadsAnnotationAgentV29Test {
             "highlight and note should reach Kindle's native journal");
         expect("1", created.get("native_upload_requests"),
             "native journal upload should be requested once per reconciliation");
+        expect("true", created.get("upload_requested"),
+            "legacy cloud delivery must report the explicit upload request");
         expect("true", created.get("native_cloud_queued"), "native cloud queue should be confirmed");
         expect("true", created.get("legacy_journaled"), "legacy journal path should be confirmed");
         expect("0", created.get("cloud_edits"), "disabled WhisperStore must not receive false edits");
@@ -105,6 +107,18 @@ public final class GoodreadsAnnotationAgentV29Test {
 
         Map<String, String> unchanged = run(sdk, desired("first note"), previous(START, END, true));
         expect("true", unchanged.get("success"), "unchanged reconciliation should succeed");
+        expect("false", unchanged.get("native_cloud_queued"),
+            "unchanged reconciliation must not claim a new cloud queue write");
+        expect("unchanged", unchanged.get("cloud_synced"),
+            "unchanged reconciliation must report its no-op delivery state");
+        expect("unavailable", unchanged.get("legacy_journaled"),
+            "unchanged reconciliation must not claim a native journal write");
+        expect("false", unchanged.get("upload_requested"),
+            "unchanged reconciliation must not claim an upload request");
+        expect("0", unchanged.get("native_journal_edits"),
+            "unchanged reconciliation must not append native journal entries");
+        expect("0", unchanged.get("native_upload_requests"),
+            "unchanged reconciliation must not request a native upload");
         expect("2", unchanged.get("native_notifications"),
             "persisted highlight and note should be re-announced to KPP");
         expect("0", unchanged.get("highlights_created"),
@@ -136,6 +150,10 @@ public final class GoodreadsAnnotationAgentV29Test {
             "legacy migration must not claim KSDK writes");
         expect("5", migrated.get("native_journal_edits"),
             "migration should delete local/cloud artifacts and replay the correct pair");
+        expect("true", migrated.get("native_cloud_queued"),
+            "forced migration replay must queue its corrected cloud state");
+        expect("true", migrated.get("upload_requested"),
+            "forced legacy migration replay must request upload");
         expect("0", migrated.get("cloud_edits"),
             "disabled WhisperStore must not receive migration edits");
         expect("2", migrated.get("legacy_cloud_deletes"),
@@ -241,7 +259,7 @@ public final class GoodreadsAnnotationAgentV29Test {
         addDesired(payload, 0, START, 100, END, 200, "");
         addDesired(payload, 1, START, 100, END, 200, "retained note");
         addDesired(payload, 2, START, 101, END, 201, "nearby note");
-        Method reader = GoodreadsAnnotationAgentV29.class.getDeclaredMethod(
+        Method reader = GoodreadsAnnotationAgentV30.class.getDeclaredMethod(
             "readRecords", Properties.class, String.class);
         reader.setAccessible(true);
         List<?> records = (List<?>) reader.invoke(null, payload, "desired");
@@ -321,7 +339,7 @@ public final class GoodreadsAnnotationAgentV29Test {
         Path result = Paths.get("/tmp/goodreads-annotation-result-" + requestId + ".log");
         Files.write(path, payload, StandardCharsets.ISO_8859_1);
         Files.deleteIfExists(result);
-        GoodreadsAnnotationAgentV29.agentmain(path.toString(), null);
+        GoodreadsAnnotationAgentV30.agentmain(path.toString(), null);
         expect(false, Files.exists(path), "agent must remove payload after loading it");
         Map<String, String> fields = readResult(result);
         Files.deleteIfExists(result);

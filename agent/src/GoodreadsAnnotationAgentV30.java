@@ -21,8 +21,8 @@ import java.util.Properties;
 import java.util.Set;
 
 /** Reconciles KOReader highlights with the native Kindle annotation store. */
-public final class GoodreadsAnnotationAgentV29 {
-    private GoodreadsAnnotationAgentV29() {}
+public final class GoodreadsAnnotationAgentV30 {
+    private GoodreadsAnnotationAgentV30() {}
 
     public static void agentmain(String payloadPath, Instrumentation instrumentation) {
         PrintWriter out;
@@ -277,13 +277,24 @@ public final class GoodreadsAnnotationAgentV29 {
                 requestNativeCloudUpload(readerSdk, counters);
             }
 
+            boolean nativeNotified = counters.nativeNotifications > 0;
+            boolean ksdkQueued = counters.ksdkWrites > 0;
+            boolean legacyQueued = counters.nativeJournalEdits > 0
+                && counters.nativeUploadRequests > 0;
+            boolean cloudSnapshotQueued = counters.cloudSnapshots > 0;
+            boolean nativeCloudQueued = ksdkQueued || legacyQueued
+                || counters.cloudEdits > 0 || cloudSnapshotQueued;
             out.println("local_verified=true");
-            out.println("native_notified=" + (notifyKpp ? "true" : "unavailable"));
-            out.println("ksdk_synced=" + (ksdkEnabled ? "true" : "unavailable"));
-            out.println("legacy_journaled=" + (!ksdkEnabled ? "true" : "unavailable"));
-            out.println("native_cloud_queued=true");
-            out.println("cloud_synced=queued");
-            out.println("cloud_snapshot_synced=" + (whisperStoreEnabled ? "true" : "unavailable"));
+            out.println("native_notified=" + (nativeNotified ? "true" : "unavailable"));
+            out.println("ksdk_synced=" + (ksdkQueued ? "true" : "unavailable"));
+            out.println("legacy_journaled=" + (legacyQueued ? "true" : "unavailable"));
+            out.println("upload_requested=" + (!ksdkEnabled
+                ? (counters.nativeUploadRequests > 0 ? "true" : "false")
+                : "unavailable"));
+            out.println("native_cloud_queued=" + nativeCloudQueued);
+            out.println("cloud_synced=" + (nativeCloudQueued ? "queued" : "unchanged"));
+            out.println("cloud_snapshot_synced="
+                + (cloudSnapshotQueued ? "true" : "unavailable"));
             out.println("success=true");
             counters.write(out);
         } catch (Throwable error) {

@@ -865,9 +865,68 @@ startup_flow = {}
 startup_flow_plugin.queueNativeAnnotationImport = function()
     return false, "invalid native import metadata", true
 end
+do
+local scheduled_before_invalid_import = #scheduled
 startup_flow_plugin:startReaderReadyAnnotationFlow(startup_flow_reader)
 assert(#startup_flow == 0,
     "invalid pending native snapshot must block a destructive pre-import outbound snapshot")
+assert(#scheduled == scheduled_before_invalid_import,
+    "deterministic native-import validation failures must not retry")
+
+-- A helper can fail transiently under device pressure even though the exact
+-- coordinate batch succeeds moments later. Retry the complete import-first
+-- flow twice, preserving ordering and keeping the retries bounded.
+startup_flow = {}
+local transient_import_attempts = 0
+startup_flow_plugin.queueNativeAnnotationImport = function(_, _, completion)
+    transient_import_attempts = transient_import_attempts + 1
+    if transient_import_attempts == 1 then
+        completion(false, "position_translation_failed")
+    else
+        completion(true, "merged")
+    end
+    return true, "queued", true
+end
+local scheduled_before_transient_import = #scheduled
+startup_flow_plugin:startReaderReadyAnnotationFlow(startup_flow_reader)
+assert(transient_import_attempts == 1 and #startup_flow == 0,
+    "a failed native import must not capture an outbound snapshot")
+assert(#scheduled == scheduled_before_transient_import + 1,
+    "a transient position-helper failure must schedule one retry")
+local transient_import_retry = table.remove(
+    scheduled, scheduled_before_transient_import + 1)
+transient_import_retry()
+assert(transient_import_attempts == 2
+    and startup_flow[1] == "reader_ready_converged" and #startup_flow == 1,
+    "a successful retry must queue exactly one converged outbound snapshot")
+
+startup_flow = {}
+local bounded_import_attempts, bounded_import_completions = 0, 0
+startup_flow_plugin.queueNativeAnnotationImport = function(_, _, completion)
+    bounded_import_attempts = bounded_import_attempts + 1
+    completion(false, "position_translation_failed")
+    return true, "queued", true
+end
+local scheduled_before_bounded_import = #scheduled
+startup_flow_plugin:startConvergedAnnotationFlow(
+    startup_flow_reader,
+    "bounded_retry_test",
+    function(success, detail)
+        assert(not success and detail == "position_translation_failed")
+        bounded_import_completions = bounded_import_completions + 1
+    end
+)
+for _ = 1, 2 do
+    assert(#scheduled == scheduled_before_bounded_import + 1,
+        "each failed native import may schedule only one retry")
+    local retry = table.remove(scheduled, scheduled_before_bounded_import + 1)
+    retry()
+end
+assert(bounded_import_attempts == 3 and bounded_import_completions == 1,
+    "native-import translation retries must stop after three total attempts")
+assert(#scheduled == scheduled_before_bounded_import,
+    "exhausted native-import retries must leave no timer behind")
+end
 
 local private_test_root = assert(os.getenv("GOODREADS_PRIVATE_STATE_DIR"))
 local pending_import_dir = private_test_root .. "/native-import"
@@ -1304,9 +1363,10 @@ io.open = function(path, mode)
             "saved_at=1786885000",
             "desired_count=2",
             "note_count=1",
+            "native_range_count=1",
             "retry_count=3",
             "retry_reason=private text must not be displayed",
-            "agent_generation=29",
+            "agent_generation=30",
             "local_verified=true",
             "journal_lane=legacy",
             "upload_requested=true",
@@ -1341,6 +1401,8 @@ assert(receipt_message:match("waiting for native reader"), "pending state must o
 assert(receipt_message:match("Cloud observation: unavailable"), "upload must not imply cloud observation")
 assert(receipt_message:match("Outbox: sequence 12; acknowledged deletion true"),
     "diagnostics must expose durable outbox acknowledgement")
+assert(receipt_message:match("2 KOReader entry/entries, 1 note%(s%); 1 unique native range%(s%)"),
+    "diagnostics must distinguish source entries from deduplicated native ranges")
 assert(not receipt_message:match("private text"), "receipt diagnostics must reject arbitrary values")
 io.open = original_open
 

@@ -11,7 +11,7 @@ plugin="$test_root/plugin"
 state="$test_root/state"
 proc="$test_root/proc"
 mkdir -p "$plugin/bin" "$state/annotation-outbox" "$state/native-import" \
-    "$state/pending" "$proc"
+    "$state/annotation-pending" "$proc"
 printf '%s\n' '0.9.0' >"$plugin/VERSION"
 : >"$plugin/bin/goodreads-annotation-export-agent-v3.jar"
 : >"$state/native-import-enabled"
@@ -20,7 +20,7 @@ printf '%s\n' '0.9.0' >"$plugin/VERSION"
 # the redacted report.
 printf '%s\n' 'private annotation text' >"$state/annotation-outbox/B012345678"
 printf '%s\n' 'private note text' >"$state/native-import/B087654321"
-printf '%s\n' 'account-secret-token' >"$state/pending/B000000001"
+printf '%s\n' 'account-secret-token' >"$state/annotation-pending/B000000001"
 
 make_process() {
     pid="$1"
@@ -38,7 +38,10 @@ make_process 100 framework 1 / 'ch.ethz.iks.concierge.framework.Framework'
 make_process 200 reader.lua 1 /mnt/us/koreader 'reader.lua'
 make_process 201 reader.lua 200 /mnt/us/koreader 'reader.lua helper'
 make_process 202 reader.lua 201 /mnt/us/koreader 'reader.lua helper'
-make_process 300 sh 1 / '/mnt/us/koreader/plugins/goodreads.koplugin/bin/watch-native-annotations'
+make_process 300 sh 1 / 'watcher fixture replaced below'
+printf '/bin/sh\0%s\0' "$plugin/bin/watch-native-annotations" >"$proc/300/cmdline"
+make_process 301 sh 1 / \
+    "diagnostic command mentioning $plugin/bin/watch-native-annotations but not running it"
 
 output="$test_root/report"
 GOODREADS_PLUGIN_DIR="$plugin" GOODREADS_PRIVATE_STATE_DIR="$state" \

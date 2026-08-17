@@ -5,6 +5,30 @@ All notable changes to this project are documented here. The project follows
 
 ## [0.11.0] - 2026-08-17
 
+### Fixed
+
+- Diagnostics now distinguish KOReader source entries from deduplicated native
+  KFX ranges, and the doctor counts the real root-only annotation pending queue
+  plus only exact native-import watcher processes.
+- Native-reader startup replay now follows the firmware's filtered DBus
+  `appStarted` signal with staggered exact-handle attempts, while retaining the
+  bounded LIPC fallback. Watcher locks carry an owner PID, recover dead owners,
+  cannot be removed by a departing older instance, and TERM interrupts the
+  blocking Kindle event child so upgrades leave exactly one watcher.
+- Close-time snapshots no longer supersede an identical translated snapshot
+  that is already pending for the same outbox sequence.
+- Idempotent annotation readback is reported as `verified_unchanged`; it no
+  longer claims a journal write, upload request, or system-queue wake that did
+  not occur. Contradictory delivery proof fails closed and stays retryable.
+- Annotation agent generation 30 forces the corrected delivery contract to
+  load even when an older agent class remains resident in Kindle's JVM.
+- Java-agent archives now use fixed entry timestamps and a fixed manifest
+  producer; the release gate rebuilds them and requires identical checksums.
+- A transient native-to-KOReader position-helper exit now retries the complete
+  import-first reconciliation twice with short backoff. Invalid snapshots and
+  rejected coordinates still fail immediately, and retries remain latest-book
+  scoped so they cannot run after the reader changes books.
+
 ### Added
 
 - Private local start/finish dates and separate first-read, reread, and manual

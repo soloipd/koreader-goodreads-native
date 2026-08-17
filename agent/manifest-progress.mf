@@ -1,4 +1,5 @@
 Manifest-Version: 1.0
 Agent-Class: GoodreadsProgressAgentV2
+Created-By: koreader-goodreads-native
 Can-Redefine-Classes: false
 Can-Retransform-Classes: false

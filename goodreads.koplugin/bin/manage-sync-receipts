@@ -33,7 +33,7 @@ print_status() {
     if [ -r "$receipt" ]; then
         while IFS= read -r line; do
             case "$line" in
-                version=*|asin=*|state=*|updated_at=*|saved_at=*|waiting_at=*|queued_at=*|desired_count=*|note_count=*|retry_count=*|retry_reason=*|agent_generation=*|trigger=*|local_verified=*|native_notified=*|journal_lane=*|upload_requested=*|sync_enqueued=*|outbox_sequence=*|outbox_acknowledged=*|cloud_observed=*)
+                version=*|asin=*|state=*|updated_at=*|saved_at=*|waiting_at=*|queued_at=*|desired_count=*|note_count=*|native_range_count=*|retry_count=*|retry_reason=*|agent_generation=*|trigger=*|local_verified=*|native_notified=*|journal_lane=*|upload_requested=*|sync_enqueued=*|outbox_sequence=*|outbox_acknowledged=*|cloud_observed=*)
                     printf '%s\n' "$line"
                     ;;
             esac
@@ -78,16 +78,21 @@ discard_pending() {
     temp="$receipt.$$"
     desired_count="$(receipt_value desired_count "$receipt")"
     note_count="$(receipt_value note_count "$receipt")"
+    native_range_count="$(receipt_value native_range_count "$receipt")"
     saved_at="$(receipt_value saved_at "$receipt")"
     agent_generation="$(receipt_value agent_generation "$receipt")"
     [ -n "$desired_count" ] || desired_count=0
     [ -n "$note_count" ] || note_count=0
+    case "$native_range_count" in
+        ''|*[!0-9]*) native_range_count=unavailable ;;
+    esac
     [ -n "$saved_at" ] || saved_at="$now"
     [ -n "$agent_generation" ] || agent_generation=unknown
     printf '%s\n' \
         'version=1' "asin=$asin" 'state=discarded' "updated_at=$now" \
         "saved_at=$saved_at" 'waiting_at=' 'queued_at=' \
         "desired_count=$desired_count" "note_count=$note_count" \
+        "native_range_count=$native_range_count" \
         'retry_count=0' 'retry_reason=user_discarded' \
         "agent_generation=$agent_generation" 'trigger=manual_discard' \
         'local_verified=unavailable' 'native_notified=unavailable' \
@@ -124,7 +129,7 @@ export_support() {
             [ -r "$receipt" ] || continue
             count=$((count + 1))
             printf '\n[book_%03d]\n' "$count"
-            for key in state updated_at saved_at waiting_at queued_at desired_count note_count retry_count retry_reason agent_generation trigger local_verified native_notified journal_lane upload_requested sync_enqueued outbox_sequence outbox_acknowledged cloud_observed; do
+            for key in state updated_at saved_at waiting_at queued_at desired_count note_count native_range_count retry_count retry_reason agent_generation trigger local_verified native_notified journal_lane upload_requested sync_enqueued outbox_sequence outbox_acknowledged cloud_observed; do
                 value="$(receipt_value "$key" "$receipt")"
                 case "$value" in *[!0-9A-Za-z._-]*) value=redacted ;; esac
                 printf '%s=%s\n' "$key" "${value:-unknown}"

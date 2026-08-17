@@ -225,11 +225,17 @@ For annotation sync, the same view also reads a durable per-book receipt from:
 /mnt/us/koreader/settings/goodreads_native_sync_receipts/<ASIN>
 ```
 
-The receipt survives KOReader restarts and reports annotation/note counts,
-timestamps, retry reason, agent generation, native lane, local readback,
-upload-request status, and system-queue status. It contains no highlight or
-note text. An accepted upload request is shown as **queued to Amazon**; it is
-never called **cloud observed** without separate server readback.
+The receipt survives KOReader restarts and reports KOReader source-entry and
+note counts alongside the deduplicated native KFX range count, plus timestamps,
+retry reason, agent generation, native lane, local readback, upload-request
+status, and system-queue status. Multiple EPUB ranges can resolve to one exact
+KFX range; in that case Kindle stores one highlight and retains the note-bearing
+version. The receipt contains no highlight or note text. A reconciliation that
+actually writes the native cloud lane is
+shown as **queued to Amazon**. An idempotent native readback with no new cloud
+write is shown as **verified unchanged** and does not claim an upload or wake
+the system queues. Neither state is called **cloud observed** without separate
+server readback.
 
 Under **Sync receipts and recovery**, you can retry the selected book's pending
 snapshot, discard only that pending snapshot after confirmation, or export an
@@ -331,8 +337,11 @@ event succeeds; a failed event is replayed without duplicating annotations.
 That plugin-origin persistence event is not treated as a new user edit, so a
 native import does not immediately enqueue an outbound echo. On reader startup,
 pending native import is resolved before one converged outbound snapshot is
-captured; an invalid or failed pending import blocks the stale pre-import
-snapshot. The same guard covers suspend, close, manual sync, and recovered
+captured. A transient reverse-position helper exit retries the complete
+import-first flow twice after short delays; malformed snapshots, rejected
+coordinates, and an exhausted retry budget block the stale pre-import snapshot
+instead of exporting it. Retries are cancelled if the reader changes books.
+The same ordering guard covers suspend, close, manual sync, and recovered
 outboxes. Later user edits continue to schedule normal reconciliation.
 Annotation and note text never enter debug logs or dedupe receipts. The note
 baseline used to detect local edits remains private inside KOReader's existing
@@ -360,10 +369,14 @@ pipeline enabled by the firmware:
 - the optional WhisperStore snapshot path is used only when the firmware has
   explicitly enabled it.
 
-A request is reported as successful only after local readback, native
-notification, a supported journal or KSDK write, and an upload-queue request
-all succeed. Diagnostics report these stages separately and never treat a
-disabled service as successful delivery.
+When a change is required, a request is reported as queued only after local
+readback, native notification, a supported journal, KSDK, or enabled snapshot
+write, and the corresponding upload-queue request all succeed. If exact native
+readback proves that every requested range and note is already present, the
+plugin reports **verified unchanged**, acknowledges the local outbox, and does
+not pretend that a new upload occurred. Contradictory or incomplete delivery
+proof fails closed and remains retryable. Diagnostics report every stage
+separately and never treat a disabled service as successful delivery.
 
 ### Upgrade repairs
 

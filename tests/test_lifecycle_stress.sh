@@ -87,6 +87,83 @@ for pid in "${competitors[@]}"; do wait "$pid"; done
 wait "$singleton_pid"
 test "$(wc -l <"$stress_root/singleton-captures" | tr -d '[:space:]')" = 1
 
+# A TERM must interrupt the blocking event child, exit promptly, and release
+# only a lock still owned by that watcher. A dead owner is then recovered
+# without allowing the departing process to remove its successor's lock.
+terminate_private="$stress_root/terminate-private"
+terminate_lock_root="$stress_root/terminate-lock"
+terminate_lock="$terminate_lock_root/goodreads-native-import-watcher.lock"
+mkdir -p "$terminate_private" "$terminate_lock_root"
+: >"$terminate_private/native-import-enabled"
+cat >"$stress_root/terminate-capture" <<EOF
+#!/bin/sh
+exit 0
+EOF
+cat >"$stress_root/terminate-wait" <<EOF
+#!/bin/sh
+printf '%s\n' "\$\$" >'$stress_root/terminate-child'
+: >'$stress_root/terminate-ready'
+exec sleep 30
+EOF
+chmod 0755 "$stress_root/terminate-capture" "$stress_root/terminate-wait"
+
+wait_for_watcher_exit() {
+    watcher_pid="$1"
+    wait_child="$2"
+    for _ in {1..200}; do
+        kill -0 "$watcher_pid" 2>/dev/null || break
+        sleep 0.01
+    done
+    if kill -0 "$watcher_pid" 2>/dev/null; then
+        kill -TERM "$wait_child" 2>/dev/null || true
+        wait "$watcher_pid" 2>/dev/null || true
+        printf 'error: native watcher ignored TERM while blocked on its event child\n' >&2
+        exit 1
+    fi
+    wait "$watcher_pid" 2>/dev/null || true
+    ! kill -0 "$wait_child" 2>/dev/null
+}
+
+GOODREADS_CAPTURE="$stress_root/terminate-capture" \
+    GOODREADS_PRIVATE_STATE_DIR="$terminate_private" \
+    GOODREADS_LOCK_DIR="$terminate_lock_root" \
+    GOODREADS_LIPC_WAIT_EVENT="$stress_root/terminate-wait" \
+    GOODREADS_HANDOFF_DELAY_SECONDS=0 \
+    "$watcher" &
+terminate_pid=$!
+for _ in {1..500}; do
+    [ -e "$stress_root/terminate-ready" ] && break
+    sleep 0.01
+done
+test -e "$stress_root/terminate-ready"
+terminate_child="$(sed -n '1p' "$stress_root/terminate-child")"
+test "$(sed -n '1p' "$terminate_lock/pid")" = "$terminate_pid"
+
+# Simulate an atomic successor lock appearing before the old process cleans up.
+printf '%s\n' 99999999 >"$terminate_lock/pid"
+kill -TERM "$terminate_pid"
+wait_for_watcher_exit "$terminate_pid" "$terminate_child"
+test "$(sed -n '1p' "$terminate_lock/pid")" = 99999999
+
+rm -f "$stress_root/terminate-ready" "$stress_root/terminate-child"
+GOODREADS_CAPTURE="$stress_root/terminate-capture" \
+    GOODREADS_PRIVATE_STATE_DIR="$terminate_private" \
+    GOODREADS_LOCK_DIR="$terminate_lock_root" \
+    GOODREADS_LIPC_WAIT_EVENT="$stress_root/terminate-wait" \
+    GOODREADS_HANDOFF_DELAY_SECONDS=0 \
+    "$watcher" &
+replacement_pid=$!
+for _ in {1..500}; do
+    [ -e "$stress_root/terminate-ready" ] && break
+    sleep 0.01
+done
+test -e "$stress_root/terminate-ready"
+replacement_child="$(sed -n '1p' "$stress_root/terminate-child")"
+test "$(sed -n '1p' "$terminate_lock/pid")" = "$replacement_pid"
+kill -TERM "$replacement_pid"
+wait_for_watcher_exit "$replacement_pid" "$replacement_child"
+test ! -e "$terminate_lock"
+
 # Put 1,000 inherited reader.lua helper processes ahead of the real process in
 # the fake /proc tree. Selection must skip every child and return only the main
 # process with a non-reader parent and exact KOReader working directory.
@@ -109,4 +186,4 @@ selected="$(
 )"
 test "$selected" = 9999
 
-printf 'Lifecycle stress tests passed: 1,000 handoffs, 50 contenders, 1,000 helper processes.\n'
+printf 'Lifecycle stress tests passed: 1,000 handoffs, 50 contenders, clean TERM/recovery, 1,000 helper processes.\n'

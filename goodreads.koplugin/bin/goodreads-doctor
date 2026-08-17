@@ -27,6 +27,11 @@ process_name() {
         | sed -n '1p'
 }
 
+process_arg() {
+    tr '\000' '\n' <"$PROC_ROOT/$1/cmdline" 2>/dev/null \
+        | sed -n "${2}p"
+}
+
 reader_processes=0
 reader_roots=0
 framework_processes=0
@@ -56,8 +61,7 @@ for status_file in "$PROC_ROOT"/[0-9]*/status; do
         framework_processes=$((framework_processes + 1))
     fi
     if [ -r "$cmdline" ] \
-        && grep -a -Fq '/goodreads.koplugin/bin/watch-native-annotations' "$cmdline" 2>/dev/null
-    then
+        && [ "$(process_arg "$pid" 2)" = "$PLUGIN_DIR/bin/watch-native-annotations" ]; then
         watcher_processes=$((watcher_processes + 1))
     fi
 done
@@ -106,7 +110,7 @@ fi
 
 annotation_outbox="$(count_files "$PRIVATE_STATE_DIR/annotation-outbox")"
 native_import_inbox="$(count_files "$PRIVATE_STATE_DIR/native-import")"
-pending_annotations="$(count_files "$PRIVATE_STATE_DIR/pending")"
+pending_annotations="$(count_files "$PRIVATE_STATE_DIR/annotation-pending")"
 
 if [ "$errors" -gt 0 ]; then
     overall=error

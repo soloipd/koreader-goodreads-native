@@ -164,18 +164,25 @@ privacy boundary on Kindle's FUSE-backed `/mnt/us`; source and translated
 pending annotation payloads therefore live on root-only `/var/local` instead.
 The agent closes and reopens the book before
 reporting local verification. Before the agent write, the shell enables both
-the legacy journal and KSDK shadow-mode lanes. After local, proxy, native
-journal, and upload-request stages succeed, it invokes
+the legacy journal and KSDK shadow-mode lanes. After an actual cloud-affecting
+write passes local readback, native notification, its supported native lane,
+and upload-request checks, the helper invokes
 `KSDKAnnotationsEnqueueForSync` and starts `com.lab126.whispersync`; a failed
-trigger is retryable and is not reported as end-to-end success. Unsupported
-paths are reported as `unavailable`, not successful. Only one native annotation request runs at a
-time. Rapid edits for the same ASIN coalesce to the newest immutable snapshot,
+trigger is retryable and is not reported as end-to-end success. An exact
+idempotent readback instead records `verified_unchanged` and skips both queue
+wakes. Unsupported paths are reported as `unavailable`, not successful. Only
+one native annotation request runs at a time. Rapid edits for the same ASIN coalesce to the newest immutable snapshot,
 while snapshots for other books remain queued. If the exact native book is not
 active, the request is not mutated or accepted: its latest snapshot moves to a
-root-only pending queue. One lock-protected watcher blocks on app manager
-`appStarted` events and replays pending books when native KPP becomes active.
-Transient native failures retry up to three times; a newer same-book snapshot
-cancels an older retry. After full native verification and queue acceptance,
+root-only pending queue. One lock-protected watcher blocks on the filtered
+system DBus `appStarted` signal and replays pending books when native KPP
+becomes active; a bounded LIPC/active-app path remains the firmware fallback.
+Transient native-write failures retry up to three times; a newer same-book
+snapshot cancels an older retry. Native-to-KOReader reverse-position helper
+exits independently retry the complete import-first flow twice with short
+backoff. Those retries are cancelled when the open reader changes books, while
+invalid snapshots and rejected coordinates fail immediately. After full native
+verification and queue acceptance,
 the helper atomically renames the source outbox entry and deletes it only if its
 sequence and checksum still match the completed request. If a newer source won
 the race, it is restored or left in place and the older operation cannot report
@@ -183,9 +190,12 @@ outbox acknowledgement.
 
 Each shell reconciliation atomically replaces a text-free per-ASIN receipt in
 `goodreads_native_sync_receipts`. Receipt transitions distinguish
-`saved_locally`, `waiting_native`, `queued_amazon`, `failed`, and a manual
-`discarded` state. They retain only counts, timestamps, bounded retry metadata,
-agent generation, capability lane, and verification booleans. The
+`saved_locally`, `waiting_native`, `queued_amazon`, `verified_unchanged`,
+`failed`, and a manual `discarded` state. `verified_unchanged` requires an exact
+native readback and explicitly records that no new cloud write or queue wake
+occurred. They retain only source-entry, note, and deduplicated native-range
+counts, timestamps, bounded retry metadata, agent generation, capability lane,
+and verification booleans. The
 `cloud_observed` field remains `unavailable` unless a future independent
 server-readback implementation verifies it; a native upload acknowledgement
 alone cannot set it.
@@ -200,7 +210,7 @@ annotation text and identifiers from the exported summary.
 
 ## Experimental native annotation import
 
-A singleton `lipc-wait-event` watcher captures a read-only snapshot while the
+A PID-owned singleton `lipc-wait-event` watcher captures a read-only snapshot while the
 native reader owns the active local `/mnt/us/documents` book. The exporter
 performs no ReaderSDK write, KPP notification, journal entry, or sync request.
 Its private result is atomically moved into a root-only native-import inbox.

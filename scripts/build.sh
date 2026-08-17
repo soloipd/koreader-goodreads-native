@@ -7,7 +7,7 @@ source_dir="$project_root/agent/src"
 build_dir="$project_root/agent/build/jdk"
 classes_dir="$build_dir/classes"
 agent_jar="$project_root/goodreads.koplugin/bin/goodreads-progress-agent-v2.jar"
-annotation_agent_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-agent-v29.jar"
+annotation_agent_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-agent-v30.jar"
 annotation_export_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-export-agent-v3.jar"
 launcher_class="$project_root/goodreads.koplugin/bin/classes/AttachLauncher.class"
 
@@ -23,6 +23,39 @@ jar_bin="${JAR:-$(dirname "$javac_bin")/jar}"
     exit 1
 }
 
+reproducible_jar() {
+    output="$1"
+    manifest="$2"
+    shift 2
+    if "$jar_bin" --help 2>&1 | grep -q -- '--date'; then
+        "$jar_bin" --create --file "$output" --manifest "$manifest" \
+            --date=1980-01-01T00:00:02Z "$@"
+        return
+    fi
+
+    # JDK 8 has no --date flag. Build once with jar so manifest normalization
+    # remains standards-compliant, then repack sorted files with fixed mtimes
+    # and no host-specific ZIP metadata.
+    raw="$output.raw.$$"
+    stage="$build_dir/reproducible-$(basename "$output").$$"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+    "$jar_bin" cfm "$raw" "$manifest" "$@"
+    unzip -qq "$raw" -d "$stage"
+    find "$stage" -exec touch -t 198001010000.02 {} +
+    rm -f "$output"
+    (
+        cd "$stage"
+        {
+            printf '%s\n' META-INF/MANIFEST.MF
+            find . -type f ! -path './META-INF/MANIFEST.MF' -print \
+                | sed 's#^\./##' | LC_ALL=C sort
+        } | zip -Xq "$output" -@
+    )
+    rm -rf "$stage"
+    rm -f "$raw"
+}
+
 rm -rf "$build_dir"
 mkdir -p "$classes_dir" "$(dirname "$agent_jar")" "$(dirname "$launcher_class")"
 find "$(dirname "$annotation_agent_jar")" -maxdepth 1 -type f \
@@ -35,23 +68,23 @@ find "$(dirname "$annotation_export_jar")" -maxdepth 1 -type f \
 "$javac_bin" --release 8 -d "$classes_dir" \
     "$source_dir/AttachLauncher.java" \
     "$source_dir/GoodreadsProgressAgentV2.java" \
-    "$source_dir/GoodreadsAnnotationAgentV29.java" \
+    "$source_dir/GoodreadsAnnotationAgentV30.java" \
     "$source_dir/GoodreadsAnnotationExportAgentV3.java"
 
-"$jar_bin" cfm "$agent_jar" "$project_root/agent/manifest-progress.mf" \
+reproducible_jar "$agent_jar" "$project_root/agent/manifest-progress.mf" \
     -C "$classes_dir" GoodreadsProgressAgentV2.class \
     -C "$classes_dir" 'GoodreadsProgressAgentV2$RequestArguments.class'
 
-"$jar_bin" cfm "$annotation_agent_jar" "$project_root/agent/manifest-annotations.mf" \
-    -C "$classes_dir" GoodreadsAnnotationAgentV29.class \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV29$1.class' \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV29$CloudAnnotationHandler.class' \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV29$Record.class' \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV29$RangeEndpoint.class' \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV29$RangeIdentity.class' \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV29$Counters.class'
+reproducible_jar "$annotation_agent_jar" "$project_root/agent/manifest-annotations.mf" \
+    -C "$classes_dir" GoodreadsAnnotationAgentV30.class \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV30$1.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV30$CloudAnnotationHandler.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV30$Record.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV30$RangeEndpoint.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV30$RangeIdentity.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV30$Counters.class'
 
-"$jar_bin" cfm "$annotation_export_jar" "$project_root/agent/manifest-annotation-export.mf" \
+reproducible_jar "$annotation_export_jar" "$project_root/agent/manifest-annotation-export.mf" \
     -C "$classes_dir" GoodreadsAnnotationExportAgentV3.class \
     -C "$classes_dir" 'GoodreadsAnnotationExportAgentV3$ExportRecord.class'
 

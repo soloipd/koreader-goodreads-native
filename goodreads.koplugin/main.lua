@@ -66,6 +66,12 @@ local PROGRESS_STATE_DIR = "/mnt/us/koreader/settings/goodreads_native_progress"
 local DEBUG_LOG_FILE = "/mnt/us/koreader/settings/goodreads_native_debug.log"
 local DEBUG_LOG_MAX_BYTES = 128 * 1024
 local DEFAULT_PROGRESS_INTERVAL_SECONDS = 300
+local NATIVE_IMPORT_RETRY_DELAYS_SECONDS = { 2, 5 }
+local NATIVE_IMPORT_RETRYABLE_ERRORS = {
+    position_translation_failed = true,
+    request_unavailable = true,
+    translation_start_failed = true,
+}
 local PROGRESS_RESULT_KEYS = {
     asin = true,
     percent = true,
@@ -87,6 +93,7 @@ local ANNOTATION_RESULT_KEYS = {
     native_notified = true,
     ksdk_synced = true,
     legacy_journaled = true,
+    upload_requested = true,
     native_cloud_queued = true,
     cloud_synced = true,
     cloud_snapshot_synced = true,
@@ -122,6 +129,7 @@ local SYNC_RECEIPT_KEYS = {
     queued_at = true,
     desired_count = true,
     note_count = true,
+    native_range_count = true,
     retry_count = true,
     retry_reason = true,
     agent_generation = true,
@@ -2278,16 +2286,27 @@ function Goodreads:pollAnnotationResult(snapshot)
         attempts = attempts + 1
         local result = readKeyValueFile(ANNOTATION_RESULT_FILE, ANNOTATION_RESULT_KEYS)
         if result and result.asin == asin and result.request_id == request_id then
+            local queued_delivery = result.native_cloud_queued == "true"
+                and result.cloud_synced == "queued"
+                and result.native_notified == "true"
+                and result.sync_enqueued == "true"
+                and (result.ksdk_synced == "true"
+                    or (result.legacy_journaled == "true"
+                        and result.upload_requested == "true")
+                    or result.cloud_snapshot_synced == "true")
+            local unchanged_delivery = result.native_cloud_queued == "false"
+                and result.cloud_synced == "unchanged"
+                and (result.native_notified == "true"
+                    or result.native_notified == "unavailable")
+                and result.ksdk_synced == "unavailable"
+                and result.legacy_journaled == "unavailable"
+                and (result.upload_requested == "false"
+                    or result.upload_requested == "unavailable")
+                and result.cloud_snapshot_synced == "unavailable"
+                and result.sync_enqueued == "unavailable"
             local success = result.success == "true"
                 and result.local_verified == "true"
-                and result.native_notified == "true"
-                and (result.ksdk_synced == "true" or result.ksdk_synced == "unavailable")
-                and (result.legacy_journaled == "true"
-                    or result.legacy_journaled == "unavailable")
-                and result.native_cloud_queued == "true"
-                and (result.cloud_snapshot_synced == "true"
-                    or result.cloud_snapshot_synced == "unavailable")
-                and result.sync_enqueued == "true"
+                and (queued_delivery or unchanged_delivery)
                 and result.outbox_sequence == tostring(snapshot.sequence)
                 and result.outbox_acknowledged == "true"
             self:debugLog("annotations_sync_result", {
@@ -2301,6 +2320,7 @@ function Goodreads:pollAnnotationResult(snapshot)
                 native_notified = result.native_notified,
                 ksdk_synced = result.ksdk_synced,
                 legacy_journaled = result.legacy_journaled,
+                upload_requested = result.upload_requested,
                 native_cloud_queued = result.native_cloud_queued,
                 cloud_synced = result.cloud_synced,
                 cloud_snapshot_synced = result.cloud_snapshot_synced,
@@ -2968,8 +2988,75 @@ function Goodreads:queueConvergedAnnotationReconcile(reader, trigger, completion
     return queued, detail, blocks_outbound
 end
 
+function Goodreads:startConvergedAnnotationFlow(reader, trigger, completion, retry_state)
+    if not retry_state then
+        self.native_import_flow_generation =
+            (self.native_import_flow_generation or 0) + 1
+        retry_state = {
+            generation = self.native_import_flow_generation,
+            asin = getBookAsin(reader),
+            retry_count = 0,
+            completed = false,
+            waiting = false,
+        }
+    end
+
+    local function finish(success, detail)
+        if retry_state.completed then return end
+        retry_state.completed = true
+        if type(completion) == "function" then completion(success, detail) end
+    end
+
+    local function reconciled(success, detail)
+        if retry_state.completed
+            or retry_state.generation ~= self.native_import_flow_generation
+        then
+            return
+        end
+        if success then
+            finish(true, detail)
+            return
+        end
+
+        local delay = NATIVE_IMPORT_RETRY_DELAYS_SECONDS[
+            retry_state.retry_count + 1]
+        if delay and NATIVE_IMPORT_RETRYABLE_ERRORS[detail]
+            and not retry_state.waiting
+        then
+            retry_state.retry_count = retry_state.retry_count + 1
+            retry_state.waiting = true
+            self:debugLog("native_import_retry", {
+                trigger = trigger,
+                asin = retry_state.asin,
+                status = "scheduled_in_" .. tostring(delay) .. "_seconds",
+                attempt = retry_state.retry_count,
+            })
+            UIManager:scheduleIn(delay, function()
+                retry_state.waiting = false
+                if retry_state.completed
+                    or retry_state.generation ~= self.native_import_flow_generation
+                then
+                    return
+                end
+                if self.ui ~= reader or not reader.document
+                    or getBookAsin(reader) ~= retry_state.asin
+                then
+                    finish(false, "reader changed before native import retry")
+                    return
+                end
+                self:startConvergedAnnotationFlow(
+                    reader, trigger, completion, retry_state)
+            end)
+            return
+        end
+        finish(false, detail)
+    end
+
+    return self:queueConvergedAnnotationReconcile(reader, trigger, reconciled)
+end
+
 function Goodreads:startReaderReadyAnnotationFlow(reader)
-    return self:queueConvergedAnnotationReconcile(
+    return self:startConvergedAnnotationFlow(
         reader,
         "reader_ready_converged",
         function(success, detail)
@@ -3388,11 +3475,7 @@ function Goodreads:onResume()
     UIManager:scheduleIn(3, function()
         if self.ui and self.ui.document then
             local reader = self.ui
-            self:queueNativeAnnotationImport(reader, function(success)
-                if success and self.ui == reader and reader.document then
-                    self:scheduleAnnotationReconcile("resume_after_native_import")
-                end
-            end)
+            self:startConvergedAnnotationFlow(reader, "resume_converged")
             self:syncReaderCheckpoint(self.ui, "resume")
             self:scheduleProgressTimer()
         end
@@ -4154,27 +4237,40 @@ function Goodreads:showDiagnostics()
     end
     if self.last_annotation_sync_result then
         local result = self.last_annotation_sync_result
-        local journal_ok = result.ksdk_synced == "true"
-            or result.legacy_journaled == "true"
-        local snapshot_ok = result.cloud_snapshot_synced == "true"
-            or result.cloud_snapshot_synced == "unavailable"
+        local queued_delivery = result.native_cloud_queued == "true"
+            and result.cloud_synced == "queued"
+            and result.native_notified == "true"
+            and result.sync_enqueued == "true"
+            and (result.ksdk_synced == "true"
+                or (result.legacy_journaled == "true"
+                    and result.upload_requested == "true")
+                or result.cloud_snapshot_synced == "true")
+        local unchanged_delivery = result.native_cloud_queued == "false"
+            and result.cloud_synced == "unchanged"
+            and (result.native_notified == "true"
+                or result.native_notified == "unavailable")
+            and result.ksdk_synced == "unavailable"
+            and result.legacy_journaled == "unavailable"
+            and (result.upload_requested == "false"
+                or result.upload_requested == "unavailable")
+            and result.cloud_snapshot_synced == "unavailable"
+            and result.sync_enqueued == "unavailable"
+        local accepted = result.success == "true"
+            and result.local_verified == "true"
+            and (queued_delivery or unchanged_delivery)
         table.insert(lines, string.format(
             _("Latest annotation sync: %s; local readback %s; KPP notification %s; native journal %s; upload request %s; system queue %s; %s highlight(s) created, %s note(s) created, %s note(s) updated"),
-            result.success == "true" and result.local_verified == "true"
-                and result.native_notified == "true"
-                and (result.ksdk_synced == "true" or result.ksdk_synced == "unavailable")
-                and (result.legacy_journaled == "true"
-                    or result.legacy_journaled == "unavailable")
-                and journal_ok
-                and result.native_cloud_queued == "true"
-                and snapshot_ok
-                and result.sync_enqueued == "true"
-                and _("accepted") or _("failed"),
+            accepted and _("accepted") or _("failed"),
             result.local_verified == "true" and _("verified") or _("not verified"),
-            result.native_notified == "true" and _("notified") or _("not notified"),
-            journal_ok and _("written") or _("not written"),
-            result.native_cloud_queued == "true" and _("requested") or _("not requested"),
-            result.sync_enqueued == "true" and _("accepted") or _("not queued"),
+            result.native_notified == "true" and _("notified")
+                or unchanged_delivery and _("unchanged") or _("not notified"),
+            (result.ksdk_synced == "true" or result.legacy_journaled == "true")
+                and _("written") or unchanged_delivery and _("unchanged")
+                or _("not written"),
+            result.upload_requested == "true" and _("requested")
+                or unchanged_delivery and _("unchanged") or _("not requested"),
+            result.sync_enqueued == "true" and _("accepted")
+                or unchanged_delivery and _("unchanged") or _("not queued"),
             result.highlights_created or "0",
             result.notes_created or "0",
             result.notes_updated or "0"
@@ -4193,6 +4289,7 @@ function Goodreads:showDiagnostics()
             saved_locally = true,
             waiting_native = true,
             queued_amazon = true,
+            verified_unchanged = true,
             cloud_observed = true,
             failed = true,
             discarded = true,
@@ -4227,6 +4324,7 @@ function Goodreads:showDiagnostics()
             none = true,
             wait_for_active_book = true,
             native_sync_enqueue = true,
+            delivery_proof = true,
             validate_payload = true,
             transfer_payload = true,
             enable_sync_lanes = true,
@@ -4235,20 +4333,22 @@ function Goodreads:showDiagnostics()
             lock_busy = true,
             user_discarded = true,
         }, "unavailable")
-        local agent_generation = receipt.agent_generation == "28" and "28" or "unknown"
+        local agent_generation = receipt.agent_generation == "30" and "30" or "unknown"
         local state_label = ({
             saved_locally = _("saved locally"),
             waiting_native = _("waiting for native reader"),
             queued_amazon = _("queued to Amazon"),
+            verified_unchanged = _("verified unchanged"),
             cloud_observed = _("cloud observed"),
             failed = _("failed; retry available"),
             discarded = _("pending snapshot discarded"),
         })[effective_state] or _("unknown")
         table.insert(lines, string.format(_("State: %s"), state_label))
         table.insert(lines, string.format(
-            _("Snapshot: %s annotation(s), %s note(s); saved %s"),
+            _("Snapshot: %s KOReader entry/entries, %s note(s); %s unique native range(s); saved %s"),
             receiptCount(receipt.desired_count),
             receiptCount(receipt.note_count),
+            receiptCount(receipt.native_range_count),
             formatReceiptTime(receipt.saved_at)
         ))
         table.insert(lines, string.format(
@@ -4531,7 +4631,7 @@ function Goodreads:addToMainMenu(menu_items)
                     if self.settings.native_annotation_import_enabled then
                         self:startNativeAnnotationWatcher()
                         if self.ui and self.ui.document then
-                            self:queueConvergedAnnotationReconcile(
+                            self:startConvergedAnnotationFlow(
                                 self.ui, "native_import_enabled")
                         end
                     else
@@ -4684,7 +4784,7 @@ function Goodreads:addToMainMenu(menu_items)
                 end,
                 callback = function()
                     local reader = self.ui
-                    self:queueConvergedAnnotationReconcile(
+                    self:startConvergedAnnotationFlow(
                         reader,
                         "manual_converged",
                         function(ok, detail)

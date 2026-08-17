@@ -10,21 +10,109 @@ PRIVATE_STATE_DIR="${GOODREADS_PRIVATE_STATE_DIR:-/var/local/koreader-goodreads-
 ENABLE_FILE="$PRIVATE_STATE_DIR/native-import-enabled"
 LOCK_ROOT="${GOODREADS_LOCK_DIR:-/tmp}"
 WATCH_LOCK="$LOCK_ROOT/goodreads-native-import-watcher.lock"
+WATCH_LOCK_OWNER="$WATCH_LOCK/pid"
+PROC_ROOT="${GOODREADS_PROC_ROOT:-/proc}"
 LIPC_WAIT_EVENT="${GOODREADS_LIPC_WAIT_EVENT:-/usr/bin/lipc-wait-event}"
 HANDOFF_DELAY_SECONDS="${GOODREADS_HANDOFF_DELAY_SECONDS:-2}"
+SCRIPT_DIR="$(unset CDPATH; cd "$(dirname "$0")" && pwd)"
+SCRIPT_PATH="$SCRIPT_DIR/$(basename "$0")"
+lock_acquired=0
+active_child=""
 
 case "$HANDOFF_DELAY_SECONDS" in ''|*[!0-9]*) exit 2 ;; esac
 [ "$HANDOFF_DELAY_SECONDS" -le 10 ] || exit 2
 
-if ! mkdir "$WATCH_LOCK" 2>/dev/null; then
+running_watcher_owner() {
+    owner="$1"
+    case "$owner" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$owner" 2>/dev/null || return 1
+
+    # On Kindle, reject a recycled PID. Hosts without procfs conservatively
+    # treat a live PID as the owner so the stress suite remains portable.
+    cmdline="$PROC_ROOT/$owner/cmdline"
+    [ -r "$cmdline" ] || return 0
+    script_arg="$(tr '\000' '\n' <"$cmdline" | sed -n '2p')"
+    [ "$script_arg" = "$0" ] || [ "$script_arg" = "$SCRIPT_PATH" ]
+}
+
+write_lock_owner() {
+    umask 077
+    printf '%s\n' "$$" >"$WATCH_LOCK_OWNER" || {
+        rm -f "$WATCH_LOCK_OWNER"
+        rmdir "$WATCH_LOCK" 2>/dev/null || true
+        return 1
+    }
+    lock_acquired=1
+}
+
+acquire_watch_lock() {
+    if mkdir "$WATCH_LOCK" 2>/dev/null; then
+        write_lock_owner
+        return $?
+    fi
+
+    # Never follow or replace an unexpected lock object.
+    [ -d "$WATCH_LOCK" ] && [ ! -L "$WATCH_LOCK" ] || return 1
+    owner="$(sed -n '1p' "$WATCH_LOCK_OWNER" 2>/dev/null || true)"
+    if [ -z "$owner" ]; then
+        # A competing process may be between mkdir and writing its owner.
+        sleep 1
+        owner="$(sed -n '1p' "$WATCH_LOCK_OWNER" 2>/dev/null || true)"
+    fi
+    running_watcher_owner "$owner" && return 1
+
+    stale_lock="$WATCH_LOCK.stale.$$"
+    [ ! -e "$stale_lock" ] || return 1
+    mv "$WATCH_LOCK" "$stale_lock" 2>/dev/null || return 1
+    if ! mkdir "$WATCH_LOCK" 2>/dev/null; then
+        rm -f "$stale_lock/pid"
+        rmdir "$stale_lock" 2>/dev/null || true
+        return 1
+    fi
+    if ! write_lock_owner; then
+        rm -f "$stale_lock/pid"
+        rmdir "$stale_lock" 2>/dev/null || true
+        return 1
+    fi
+    rm -f "$stale_lock/pid"
+    rmdir "$stale_lock" 2>/dev/null || true
+    return 0
+}
+
+release_watch_lock() {
+    [ "$lock_acquired" -eq 1 ] || return 0
+    owner="$(sed -n '1p' "$WATCH_LOCK_OWNER" 2>/dev/null || true)"
+    [ "$owner" = "$$" ] || return 0
+    rm -f "$WATCH_LOCK_OWNER"
+    rmdir "$WATCH_LOCK" 2>/dev/null || true
+}
+
+stop_watcher() {
+    trap - HUP INT TERM
+    case "$active_child" in
+        ''|*[!0-9]*) ;;
+        *) kill -TERM "$active_child" 2>/dev/null || true ;;
+    esac
     exit 0
-fi
-trap 'rmdir "$WATCH_LOCK" 2>/dev/null || true' EXIT HUP INT TERM
+}
+
+run_quiet_child() {
+    "$@" >/dev/null 2>&1 &
+    active_child=$!
+    wait "$active_child"
+    child_status=$?
+    active_child=""
+    return "$child_status"
+}
+
+acquire_watch_lock || exit 0
+trap release_watch_lock EXIT
+trap stop_watcher HUP INT TERM
 [ -f "$ENABLE_FILE" ] || exit 0
 
 # Capture an already-active native reader before waiting for the next event.
-"$CAPTURE" >/dev/null 2>&1 || true
-while "$LIPC_WAIT_EVENT" com.lab126.appmgrd appStarted >/dev/null 2>&1; do
+run_quiet_child "$CAPTURE" || true
+while run_quiet_child "$LIPC_WAIT_EVENT" com.lab126.appmgrd appStarted; do
     [ -f "$ENABLE_FILE" ] || exit 0
     [ "$HANDOFF_DELAY_SECONDS" -eq 0 ] || sleep "$HANDOFF_DELAY_SECONDS"
     # A successful export proves that an exact local Kindle book is active.
@@ -32,8 +120,8 @@ while "$LIPC_WAIT_EVENT" com.lab126.appmgrd appStarted >/dev/null 2>&1; do
     # affected firmware: it can feed a high-rate powerd/D-Bus loop and freeze
     # the native UI. Ask only the main KOReader process to shut down normally;
     # never SIGKILL it, and never do this for the initial already-active probe.
-    if "$CAPTURE" >/dev/null 2>&1; then
-        "$HANDOFF" >/dev/null 2>&1 || true
+    if run_quiet_child "$CAPTURE"; then
+        run_quiet_child "$HANDOFF" || true
     fi
 done
 exit 0
