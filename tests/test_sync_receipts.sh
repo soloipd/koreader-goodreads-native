@@ -188,6 +188,61 @@ printf '%s\n' 200000 600000 >"$test_root/expected-dbus-sleeps"
 cmp -s "$test_root/expected-dbus-sleeps" "$test_root/dbus-sleep-calls"
 test ! -e "$dbus_pending/$asin"
 
+# TERM during a blocked DBus listen must exit the watcher and release its
+# singleton lock; upgrade/restart must never leave an untracked old listener.
+signal_plugin="$test_root/signal-plugin"
+signal_private="$test_root/signal-private"
+signal_pending="$signal_private/annotation-pending"
+signal_lock="$test_root/signal-lock"
+mkdir -p "$signal_plugin/bin" "$signal_pending" "$signal_lock" \
+    "$test_root/signal-tmp"
+cat >"$signal_plugin/bin/sync-annotations" <<'EOF'
+#!/bin/sh
+rm -f "$1"
+exit 1
+EOF
+cat >"$test_root/signal-dbus-monitor" <<'EOF'
+#!/bin/sh
+trap 'exit 0' HUP INT TERM
+while :; do
+    printf '%s\n' \
+        'signal sender=org.freedesktop.DBus -> dest=:1.1; interface=org.freedesktop.DBus; member=NameAcquired'
+    sleep 1
+done
+EOF
+cat >"$signal_pending/$asin" <<EOF
+version=1
+asin=$asin
+request_id=1
+retry_count=0
+desired_count=0
+EOF
+chmod 0755 "$signal_plugin/bin/sync-annotations" "$test_root/signal-dbus-monitor"
+GOODREADS_PLUGIN_DIR="$signal_plugin" GOODREADS_SETTINGS_DIR="$watch_settings" \
+    GOODREADS_PRIVATE_STATE_DIR="$signal_private" \
+    GOODREADS_LOCK_DIR="$signal_lock" GOODREADS_TMP_DIR="$test_root/signal-tmp" \
+    GOODREADS_DBUS_MONITOR="$test_root/signal-dbus-monitor" \
+    GOODREADS_TIMEOUT_BIN="$test_root/dbus-timeout" \
+    GOODREADS_USLEEP_BIN="$test_root/dbus-usleep" \
+    "$project_root/goodreads.koplugin/bin/watch-pending-annotations" &
+signal_watcher_pid=$!
+for _ in {1..100}; do
+    [ -d "$signal_lock/goodreads-annotation-watcher.lock" ] && break
+    sleep 0.01
+done
+test -d "$signal_lock/goodreads-annotation-watcher.lock"
+kill -TERM "$signal_watcher_pid"
+for _ in {1..100}; do
+    ! kill -0 "$signal_watcher_pid" 2>/dev/null && break
+    sleep 0.01
+done
+if kill -0 "$signal_watcher_pid" 2>/dev/null; then
+    printf 'error: annotation watcher survived TERM\n' >&2
+    exit 1
+fi
+wait "$signal_watcher_pid"
+test ! -d "$signal_lock/goodreads-annotation-watcher.lock"
+
 # Acknowledgement is compare-and-delete: a matching snapshot is removed, a
 # superseding snapshot is restored, and a snapshot created after the atomic
 # move survives successful acknowledgement of the older request.

@@ -55,7 +55,11 @@ if [ -z "$once_asin" ]; then
     if ! mkdir "$WATCH_LOCK" 2>/dev/null; then
         exit 0
     fi
-    trap 'rmdir "$WATCH_LOCK" 2>/dev/null || true' EXIT HUP INT TERM
+    cleanup_watcher() {
+        rmdir "$WATCH_LOCK" 2>/dev/null || true
+    }
+    trap cleanup_watcher EXIT
+    trap 'exit 0' HUP INT TERM
 fi
 
 replay_pending() {
