@@ -15,6 +15,7 @@ local util = require("util")
 local Event = require("ui/event")
 local AnnotationOutbox = require("annotationoutbox")
 local ShelfState = require("shelfstate")
+local ReadingHistory = require("readinghistory")
 
 local LIPC_HASH_TOOL = "/usr/bin/lipc-hash-prop"
 local SQLITE_TOOL = "/usr/bin/sqlite3"
@@ -42,6 +43,20 @@ local NATIVE_IMPORT_DIR = PRIVATE_STATE_DIR .. "/native-import"
 local NATIVE_IMPORT_ENABLED_FILE = PRIVATE_STATE_DIR .. "/native-import-enabled"
 local NATIVE_IMPORT_WATCHER = "/mnt/us/koreader/plugins/goodreads.koplugin/bin/watch-native-annotations"
 local ANNOTATION_SEQUENCE_DIR = PRIVATE_STATE_DIR .. "/annotation-sequences"
+local READING_HISTORY_FILE = PRIVATE_STATE_DIR .. "/reading-history-v1"
+local READING_HISTORY_BACKUP = READING_HISTORY_FILE .. ".bak"
+local READING_HISTORY_CORRUPT = READING_HISTORY_FILE .. ".corrupt"
+local READING_HISTORY_LOCK = os.getenv("GOODREADS_HISTORY_LOCK")
+    or PRIVATE_STATE_DIR .. "/reading-history-v1.lock"
+local READING_HISTORY_REAPER = READING_HISTORY_LOCK .. ".reap"
+local READING_HISTORY_LOCK_STALE_SECONDS = 120
+local READING_HISTORY_REAPER_STALE_SECONDS = 10
+local READING_HISTORY_EXPORT_DIR = os.getenv("GOODREADS_HISTORY_EXPORT_DIR")
+    or "/mnt/us/koreader/settings"
+local READING_HISTORY_EXPORT_JSON = READING_HISTORY_EXPORT_DIR
+    .. "/goodreads_reading_history.json"
+local READING_HISTORY_EXPORT_CSV = READING_HISTORY_EXPORT_DIR
+    .. "/goodreads_reading_history.csv"
 local SHA256_TOOL = os.getenv("GOODREADS_SHA256_TOOL") or "/usr/bin/sha256sum"
 local RATING_HELPER = "/mnt/us/koreader/plugins/goodreads.koplugin/bin/sync-rating"
 local RATING_RESULT_PREFIX = "/tmp/goodreads-rating-result"
@@ -128,6 +143,14 @@ local DEBUG_FIELD_ORDER = {
     "resolver",
     "action",
     "status",
+    "history_sequence",
+    "history_sessions",
+    "history_outcome",
+    "history_source",
+    "streak",
+    "annual_goal",
+    "annual_completed",
+    "projected_days",
     "http_status",
     "response_valid",
     "error_envelope",
@@ -418,7 +441,10 @@ local function getBookState(reader)
 end
 
 local function actionForState(percent, status)
-    if status == "complete" or percent >= 0.99 then
+    -- A percentage is a position hint, not proof of completion. In particular,
+    -- 99% often means front/back matter remains. Only KOReader's explicit
+    -- completion status or the manual Read action may finish a lifecycle.
+    if status == "complete" then
         return ACTION_READ
     end
 
@@ -485,6 +511,57 @@ local function readFirstLine(path)
     end
     local value = file:read("*l")
     file:close()
+    return value
+end
+
+local function fileSystemObjectExists(path)
+    local status = os.execute(
+        "test -e " .. util.shell_escape({ path })
+            .. " -o -L " .. util.shell_escape({ path })
+            .. " >/dev/null 2>&1")
+    return status == 0 or status == true
+end
+
+local function isDirectoryNoFollow(path)
+    local status = os.execute(
+        "test -d " .. util.shell_escape({ path })
+            .. " -a ! -L " .. util.shell_escape({ path })
+            .. " >/dev/null 2>&1")
+    return status == 0 or status == true
+end
+
+local function isRegularFileNoFollow(path)
+    local status = os.execute(
+        "test -f " .. util.shell_escape({ path })
+            .. " -a ! -L " .. util.shell_escape({ path })
+            .. " >/dev/null 2>&1")
+    return status == 0 or status == true
+end
+
+local function readBoundedRegularLine(path, maximum)
+    maximum = maximum or 128
+    if not isRegularFileNoFollow(path) then return nil end
+    local file = io.open(path, "rb")
+    if not file then return nil end
+    local content = file:read(maximum + 1)
+    file:close()
+    if not content or #content > maximum then return nil end
+    return content:match("^([^\r\n]*)\r?\n?$")
+end
+
+local function pathModificationTime(path)
+    if type(path) ~= "string" or not path:match("^/[%w%._/%-]+$") then
+        return nil
+    end
+    local escaped = util.shell_escape({ path })
+    local pipe = io.popen(
+        "stat -c %Y " .. escaped .. " 2>/dev/null"
+            .. " || stat -f %m " .. escaped .. " 2>/dev/null",
+        "r"
+    )
+    if not pipe then return nil end
+    local value = tonumber(pipe:read("*l"))
+    pipe:close()
     return value
 end
 
@@ -595,6 +672,702 @@ local function openPrivateFile(path)
         return nil
     end
     return io.open(path, "w")
+end
+
+local function openExclusivePrivateTemp(template)
+    if type(template) ~= "string"
+        or not template:match("^/[%w%._/%-]+XXXXXX$")
+    then
+        return nil, nil
+    end
+    local prefix = template:sub(1, -7)
+    local pipe = io.popen(
+        "umask 077; mktemp " .. util.shell_escape({ template })
+            .. " 2>/dev/null",
+        "r"
+    )
+    if not pipe then return nil, nil end
+    local path = pipe:read("*l")
+    pipe:close()
+    local suffix = path and path:sub(#prefix + 1) or ""
+    if not path or path:sub(1, #prefix) ~= prefix
+        or not suffix:match("^[%w][%w][%w][%w][%w][%w]+$")
+    then
+        if path and path:sub(1, #prefix) == prefix then os.remove(path) end
+        return nil, nil
+    end
+    local file = io.open(path, "wb")
+    if not file then
+        os.remove(path)
+        return nil, nil
+    end
+    return file, path
+end
+
+local function commandSucceeded(status)
+    return status == 0 or status == true
+end
+
+local function writeCompleteFile(file, content)
+    if not file then return false end
+    local wrote = file:write(content)
+    local closed = file:close()
+    return wrote ~= nil and closed ~= nil
+end
+
+local function ensurePrivateStateDirectory()
+    return commandSucceeded(os.execute(
+        "umask 077; mkdir -p " .. util.shell_escape({ PRIVATE_STATE_DIR })
+            .. "; chmod 700 " .. util.shell_escape({ PRIVATE_STATE_DIR })
+    ))
+end
+
+local function readReadingHistoryFile(path)
+    if not isRegularFileNoFollow(path) then
+        return nil, "history file is not a regular file"
+    end
+    local content = readWholeFile(path, ReadingHistory.MAX_BODY_BYTES + 80)
+    if not content then return nil, "history file missing" end
+    local body, checksum, split_error = ReadingHistory.split(content)
+    if not body then return nil, split_error end
+    local verify, verify_path = openExclusivePrivateTemp(
+        READING_HISTORY_FILE .. ".verify.XXXXXX")
+    if not verify then return nil, "cannot create history checksum input" end
+    if not writeCompleteFile(verify, body) then
+        os.remove(verify_path)
+        return nil, "cannot write history checksum input"
+    end
+    local actual = sha256File(verify_path)
+    os.remove(verify_path)
+    if actual ~= checksum then return nil, "history checksum mismatch" end
+    return ReadingHistory.parse(body)
+end
+
+local function loadReadingHistory()
+    local primary_exists = fileSystemObjectExists(READING_HISTORY_FILE)
+    if primary_exists then
+        local state, detail = readReadingHistoryFile(READING_HISTORY_FILE)
+        if state then return state, "primary" end
+        if fileSystemObjectExists(READING_HISTORY_BACKUP) then
+            local backup, backup_detail =
+                readReadingHistoryFile(READING_HISTORY_BACKUP)
+            if backup then return backup, "backup", detail end
+            return nil, nil, backup_detail or detail
+        end
+        return nil, nil, detail
+    end
+    if fileSystemObjectExists(READING_HISTORY_BACKUP) then
+        local backup, detail = readReadingHistoryFile(READING_HISTORY_BACKUP)
+        if backup then return backup, "backup", "primary history missing" end
+        return nil, nil, detail
+    end
+    return ReadingHistory.new(), "new"
+end
+
+local function cleanupReadingHistoryTemps()
+    local pipe = io.popen(
+        "LC_ALL=C /bin/ls -1 " .. util.shell_escape({ PRIVATE_STATE_DIR })
+            .. " 2>/dev/null",
+        "r"
+    )
+    if not pipe then return end
+    for name in pipe:lines() do
+        if name:match(
+            "^reading%-history%-v1%.tmp%.[%w][%w][%w][%w][%w][%w]+$")
+            or name:match(
+                "^reading%-history%-v1%.verify%.[%w][%w][%w][%w][%w][%w]+$")
+        then
+            os.remove(PRIVATE_STATE_DIR .. "/" .. name)
+        end
+    end
+    pipe:close()
+end
+
+local function persistReadingHistory(state, source, fault_stage)
+    if not ensurePrivateStateDirectory() then
+        return false, "cannot create private history directory"
+    end
+    local body, encode_error = ReadingHistory.encode(state)
+    if not body then return false, encode_error end
+    local temp, temp_path = openExclusivePrivateTemp(
+        READING_HISTORY_FILE .. ".tmp.XXXXXX")
+    if not temp then return false, "cannot create history temporary file" end
+    if not writeCompleteFile(temp, body)
+        or readWholeFile(temp_path, ReadingHistory.MAX_BODY_BYTES) ~= body
+    then
+        os.remove(temp_path)
+        return false, "cannot write complete reading history"
+    end
+    if fault_stage == "after_body_write" then
+        return false, "injected interruption after history body"
+    end
+    local checksum = sha256File(temp_path)
+    local packed = checksum and ReadingHistory.pack(body, checksum) or nil
+    if not packed then
+        os.remove(temp_path)
+        return false, "cannot checksum reading history"
+    end
+    if fault_stage == "after_checksum" then
+        return false, "injected interruption after history checksum"
+    end
+    temp = io.open(temp_path, "wb")
+    if not temp then
+        os.remove(temp_path)
+        return false, "cannot finalize reading history"
+    end
+    if not writeCompleteFile(temp, packed)
+        or readWholeFile(temp_path, ReadingHistory.MAX_BODY_BYTES + 80) ~= packed
+    then
+        os.remove(temp_path)
+        return false, "cannot finalize complete reading history"
+    end
+    if fault_stage == "after_envelope_write" then
+        return false, "injected interruption after history envelope"
+    end
+    if not commandSucceeded(os.execute(
+        "chmod 600 " .. util.shell_escape({ temp_path })))
+    then
+        os.remove(temp_path)
+        return false, "cannot protect reading history"
+    end
+
+    if source == "backup" and fileSystemObjectExists(READING_HISTORY_FILE) then
+        os.remove(READING_HISTORY_CORRUPT)
+        if not os.rename(READING_HISTORY_FILE, READING_HISTORY_CORRUPT) then
+            os.remove(temp_path)
+            return false, "cannot quarantine corrupt reading history"
+        end
+    elseif fileSystemObjectExists(READING_HISTORY_FILE) then
+        os.remove(READING_HISTORY_BACKUP)
+        if not os.rename(READING_HISTORY_FILE, READING_HISTORY_BACKUP) then
+            os.remove(temp_path)
+            return false, "cannot rotate reading history backup"
+        end
+    end
+    if fault_stage == "after_backup_rotation" then
+        return false, "injected interruption after history backup"
+    end
+    if not os.rename(temp_path, READING_HISTORY_FILE) then
+        os.remove(temp_path)
+        if not fileSystemObjectExists(READING_HISTORY_FILE)
+            and fileSystemObjectExists(READING_HISTORY_BACKUP)
+        then
+            os.rename(READING_HISTORY_BACKUP, READING_HISTORY_FILE)
+        end
+        return false, "cannot commit reading history"
+    end
+    if fault_stage == "after_history_commit" then
+        return false, "injected interruption after history commit"
+    end
+    return true, checksum
+end
+
+local function parseReadingHistoryLockOwner(owner_line)
+    if type(owner_line) ~= "string" then return nil, nil end
+    local timestamp, token = owner_line:match(
+        "^(%d+):(%d+%-%d%d%d%d%d%d)$")
+    if timestamp then return tonumber(timestamp), token end
+    timestamp = owner_line:match("^(%d+):pending$")
+        or owner_line:match("^(%d%d%d%d%d%d%d%d%d%d)$")
+    return tonumber(timestamp), nil
+end
+
+local function acquireReadingHistoryReaper()
+    local function create()
+        return commandSucceeded(os.execute(
+            "umask 077; mkdir " .. util.shell_escape({ READING_HISTORY_REAPER })
+                .. " >/dev/null 2>&1"))
+    end
+    if create() then return true end
+    if not isDirectoryNoFollow(READING_HISTORY_REAPER) then return false end
+    local modified = pathModificationTime(READING_HISTORY_REAPER)
+    if not modified
+        or os.time() - modified <= READING_HISTORY_REAPER_STALE_SECONDS
+    then
+        return false
+    end
+    os.execute("rmdir " .. util.shell_escape({ READING_HISTORY_REAPER })
+        .. " >/dev/null 2>&1")
+    return create()
+end
+
+local function releaseReadingHistoryReaper()
+    os.execute("rmdir " .. util.shell_escape({ READING_HISTORY_REAPER })
+        .. " >/dev/null 2>&1")
+end
+
+local function acquireReadingHistoryLock()
+    if not ensurePrivateStateDirectory() then return false end
+    local function tryAcquire()
+        if fileSystemObjectExists(READING_HISTORY_REAPER) then return false end
+        local token = string.format(
+            "%d-%d", os.time(), math.random(100000, 999999))
+        local status = os.execute(
+            "umask 077; mkdir " .. util.shell_escape({ READING_HISTORY_LOCK })
+                .. " >/dev/null 2>&1")
+        if not commandSucceeded(status) then return false end
+        -- A stale-lock reaper may have started after the first check. Never
+        -- publish a new owner while it is active.
+        if fileSystemObjectExists(READING_HISTORY_REAPER) then
+            os.execute("rmdir " .. util.shell_escape({ READING_HISTORY_LOCK })
+                .. " >/dev/null 2>&1")
+            return false
+        end
+        local owner = openPrivateFile(READING_HISTORY_LOCK .. "/owner")
+        if not writeCompleteFile(
+            owner, string.format("%d:%s\n", os.time(), token))
+        then
+            os.remove(READING_HISTORY_LOCK .. "/owner")
+            os.execute("rmdir " .. util.shell_escape({ READING_HISTORY_LOCK })
+                .. " >/dev/null 2>&1")
+            return false
+        end
+        return token
+    end
+    local token = tryAcquire()
+    if token then return token end
+    if not isDirectoryNoFollow(READING_HISTORY_LOCK) then return false end
+
+    local owner_path = READING_HISTORY_LOCK .. "/owner"
+    local observed_line = readBoundedRegularLine(owner_path, 128)
+    local observed_modified = pathModificationTime(READING_HISTORY_LOCK)
+    local observed_time = parseReadingHistoryLockOwner(observed_line)
+        or observed_modified
+    if not observed_time
+        or os.time() - observed_time <= READING_HISTORY_LOCK_STALE_SECONDS
+        or not acquireReadingHistoryReaper()
+    then
+        return false
+    end
+
+    -- Re-read under the reaper gate. A contender that was already between its
+    -- initial gate check and mkdir must remove its empty directory when it sees
+    -- this gate, so a new owner cannot be mistaken for the observed stale one.
+    local current_line = readBoundedRegularLine(owner_path, 128)
+    local current_modified = pathModificationTime(READING_HISTORY_LOCK)
+    local current_time = parseReadingHistoryLockOwner(current_line)
+        or current_modified
+    local unchanged = current_line == observed_line
+        and current_modified == observed_modified
+    if unchanged and current_time
+        and os.time() - current_time > READING_HISTORY_LOCK_STALE_SECONDS
+        and isDirectoryNoFollow(READING_HISTORY_LOCK)
+    then
+        if fileSystemObjectExists(owner_path) then os.remove(owner_path) end
+        os.execute("rmdir " .. util.shell_escape({ READING_HISTORY_LOCK })
+            .. " >/dev/null 2>&1")
+    end
+    releaseReadingHistoryReaper()
+    return tryAcquire()
+end
+
+local function releaseReadingHistoryLock(token)
+    local owner_line = readBoundedRegularLine(
+        READING_HISTORY_LOCK .. "/owner", 128)
+    local owner_token = owner_line and owner_line:match(
+        "^%d+:(%d+%-%d%d%d%d%d%d)$")
+    if not token or owner_token ~= token then return false end
+    os.remove(READING_HISTORY_LOCK .. "/owner")
+    os.execute("rmdir " .. util.shell_escape({ READING_HISTORY_LOCK })
+        .. " >/dev/null 2>&1")
+    return true
+end
+
+function Goodreads:reloadReadingHistory()
+    local state, source, detail = loadReadingHistory()
+    self.reading_history = state
+    self.reading_history_source = source
+    self.reading_history_error = state and nil or detail
+    self.reading_history_recovered = source == "backup"
+    return state, detail
+end
+
+function Goodreads:updateReadingHistory(operation)
+    if type(operation) ~= "function" then
+        return false, "invalid history operation"
+    end
+    local lock_token = acquireReadingHistoryLock()
+    if not lock_token then
+        return false, "reading history is busy"
+    end
+    cleanupReadingHistoryTemps()
+    local state, source, load_detail = loadReadingHistory()
+    if not state then
+        releaseReadingHistoryLock(lock_token)
+        self.reading_history_error = load_detail
+        return false, load_detail
+    end
+    local call_ok, changed, detail = pcall(operation, state)
+    if not call_ok then
+        releaseReadingHistoryLock(lock_token)
+        return false, "reading history operation failed"
+    end
+    if not changed then
+        self.reading_history = state
+        self.reading_history_source = source
+        self.reading_history_error = nil
+        self.reading_history_recovered = source == "backup"
+        releaseReadingHistoryLock(lock_token)
+        return false, detail
+    end
+    local persisted, persist_detail = persistReadingHistory(
+        state, source, self.reading_history_fault_stage)
+    releaseReadingHistoryLock(lock_token)
+    if not persisted then return false, persist_detail end
+    self.reading_history = state
+    self.reading_history_source = "primary"
+    self.reading_history_error = nil
+    self.reading_history_recovered = source == "backup"
+    return true, detail
+end
+
+function Goodreads:recordReadingHistory(asin, percent, status, trigger)
+    if self.reading_history
+        and not ReadingHistory.checkpointNeeded(
+            self.reading_history, asin, percent, status)
+    then
+        return false, "unchanged"
+    end
+    local at = os.time()
+    local changed, detail = self:updateReadingHistory(function(state)
+        return ReadingHistory.record(state, asin, percent, status, at)
+    end)
+    if changed then
+        self:debugLog("reading_history_updated", {
+            trigger = trigger or "checkpoint",
+            asin = asin,
+            percent = percentageForProgress(percent),
+            history_sequence = self.reading_history.sequence,
+            history_outcome = detail,
+            history_source = self.reading_history_recovered and "backup" or "primary",
+            status = "saved_locally",
+            success = true,
+        })
+    elseif detail and detail ~= "unchanged" and detail ~= "no progress"
+        and detail ~= "ended session unchanged"
+    then
+        self:debugLog("reading_history_skipped", {
+            trigger = trigger or "checkpoint",
+            status = safeDebugValue(detail),
+            success = false,
+        })
+    end
+    return changed, detail
+end
+
+function Goodreads:completeReadingHistory(asin, percent, trigger)
+    local at = os.time()
+    local changed, detail = self:updateReadingHistory(function(state)
+        return ReadingHistory.markCompleted(state, asin, percent, at)
+    end)
+    if changed then
+        self:debugLog("reading_history_completed", {
+            trigger = trigger or "explicit",
+            asin = asin,
+            percent = percentageForProgress(percent),
+            history_sequence = self.reading_history.sequence,
+            history_outcome = "completed",
+            status = "saved_locally",
+            success = true,
+        })
+    end
+    return changed, detail
+end
+
+function Goodreads:activateReadingHistory(asin, percent, trigger)
+    local at = os.time()
+    local changed, detail = self:updateReadingHistory(function(state)
+        return ReadingHistory.markReading(state, asin, percent, at)
+    end)
+    if changed then
+        self:debugLog("reading_history_started", {
+            trigger = trigger or "explicit",
+            history_sequence = self.reading_history.sequence,
+            history_outcome = detail,
+            status = "saved_locally",
+            success = true,
+        })
+    end
+    return changed, detail
+end
+
+local function currentHistoryBook(plugin)
+    local reader = plugin.ui and plugin.ui.document and plugin.ui
+    if not reader then return nil, nil, nil, "no open document" end
+    local asin = getBookAsin(reader)
+    local percent = select(1, getBookState(reader))
+    if not isAsin(asin) or type(percent) ~= "number" then
+        return nil, nil, nil, "book has no syncable ASIN or progress"
+    end
+    return reader, asin, percent
+end
+
+function Goodreads:markCurrentBookDnf()
+    local reader_context, asin, percent, context_error = currentHistoryBook(self)
+    if not asin then
+        UIManager:show(InfoMessage:new({
+            text = _("Open a Kindle ASIN book in KOReader first."),
+            timeout = 4,
+        }))
+        return false, context_error
+    end
+    local at = os.time()
+    local changed, detail = self:updateReadingHistory(function(state)
+        return ReadingHistory.markDnf(state, asin, percent, at)
+    end)
+    UIManager:show(InfoMessage:new({
+        text = changed and _("Marked DNF locally. Goodreads was not changed.")
+            or string.format(_("Could not mark DNF: %s"), detail or _("unknown error")),
+        timeout = 5,
+    }))
+    if changed then
+        self:debugLog("reading_history_dnf", {
+            trigger = "manual_dnf",
+            history_sequence = self.reading_history.sequence,
+            history_outcome = "dnf",
+            status = "saved_locally",
+            success = true,
+        })
+    end
+    return changed, detail
+end
+
+function Goodreads:showMarkDnfDialog()
+    local dialog
+    dialog = ButtonDialog:new({
+        title = _(
+            "Mark this reading session DNF?\n"
+                .. "This is private local history and will not change Goodreads."
+        ),
+        title_align = "center",
+        width_factor = 0.9,
+        buttons = {
+            {
+                {
+                    text = _("Mark DNF"),
+                    callback = function()
+                        UIManager:close(dialog)
+                        self:markCurrentBookDnf()
+                    end,
+                },
+                {
+                    text = _("Cancel"),
+                    callback = function() UIManager:close(dialog) end,
+                },
+            },
+        },
+    })
+    UIManager:show(dialog)
+end
+
+function Goodreads:undoCurrentBookDnf()
+    local reader_context, asin, percent, context_error = currentHistoryBook(self)
+    if not asin then
+        UIManager:show(InfoMessage:new({
+            text = _("Open a Kindle ASIN book in KOReader first."),
+            timeout = 4,
+        }))
+        return false, context_error
+    end
+    local at = os.time()
+    local changed, detail = self:updateReadingHistory(function(state)
+        return ReadingHistory.undoDnf(state, asin, at)
+    end)
+    UIManager:show(InfoMessage:new({
+        text = changed and _("DNF undone; the same local session is active again.")
+            or string.format(_("Could not undo DNF: %s"), detail or _("unknown error")),
+        timeout = 5,
+    }))
+    return changed, detail
+end
+
+function Goodreads:startCurrentBookReread()
+    local reader_context, asin, percent, context_error = currentHistoryBook(self)
+    if not asin then
+        UIManager:show(InfoMessage:new({
+            text = _("Open a Kindle ASIN book in KOReader first."),
+            timeout = 4,
+        }))
+        return false, context_error
+    end
+    local at = os.time()
+    local changed, detail = self:updateReadingHistory(function(state)
+        return ReadingHistory.startReread(state, asin, percent, at)
+    end)
+    UIManager:show(InfoMessage:new({
+        text = changed and _("Started a separate local reread session.")
+            or string.format(_("Could not start reread: %s"), detail or _("unknown error")),
+        timeout = 5,
+    }))
+    return changed, detail
+end
+
+function Goodreads:setAnnualReadingGoal(target)
+    local year = tonumber(os.date("%Y"))
+    local changed, detail = self:updateReadingHistory(function(state)
+        return ReadingHistory.setAnnualGoal(state, year, target)
+    end)
+    UIManager:show(InfoMessage:new({
+        text = changed and (target == 0 and _("Annual reading goal disabled.")
+            or string.format(_("Annual reading goal set to %d."), target))
+            or string.format(_("Could not change annual goal: %s"), detail or _("unknown error")),
+        timeout = 4,
+    }))
+    return changed, detail
+end
+
+function Goodreads:getAnnualReadingGoal()
+    local state = self.reading_history or self:reloadReadingHistory()
+    local year = os.date("%Y")
+    return state and state.goals[year] or nil
+end
+
+function Goodreads:showReadingHistoryStats()
+    local state, load_detail = self:reloadReadingHistory()
+    if not state then
+        UIManager:show(InfoMessage:new({
+            text = string.format(
+                _("Private reading history is unavailable: %s"),
+                load_detail or _("unknown error")
+            ),
+            timeout = 6,
+        }))
+        return false
+    end
+    local reader = self.ui and self.ui.document and self.ui
+    local asin = reader and getBookAsin(reader) or nil
+    local stats, detail = ReadingHistory.metrics(state, os.time(), asin)
+    if not stats then return false, detail end
+    local lines = {
+        _("Private reading history"),
+        "",
+        string.format(
+            _("Sessions: %d total; %d completed; %d reread; %d DNF"),
+            stats.total_sessions,
+            stats.completed_sessions,
+            stats.reread_sessions,
+            stats.dnf_sessions
+        ),
+        string.format(
+            _("Reading streak: %d day(s); longest %d"),
+            stats.current_streak,
+            stats.longest_streak
+        ),
+    }
+    if stats.annual_goal then
+        table.insert(lines, string.format(
+            _("This year: %d of %d complete; %d remaining"),
+            stats.annual_completed,
+            stats.annual_goal,
+            stats.annual_remaining
+        ))
+    else
+        table.insert(lines, string.format(
+            _("This year: %d complete; no goal set"),
+            stats.annual_completed
+        ))
+    end
+    if stats.current_session then
+        local current = stats.current_session
+        table.insert(lines, "")
+        table.insert(lines, string.format(
+            _("Current session #%d started %s"),
+            current.ordinal,
+            os.date("%Y-%m-%d", current.started_at)
+        ))
+        table.insert(lines, string.format(
+            _("Progress: %s%%; pace %.2f percentage points/day"),
+            current.last_percent,
+            current.pace_percent_per_day
+        ))
+        if current.projected_at then
+            table.insert(lines, string.format(
+                _("Projected finish: %s (%d day(s))"),
+                os.date("%Y-%m-%d", current.projected_at),
+                current.projected_days
+            ))
+        else
+            table.insert(lines, _("Projected finish: not enough progress yet"))
+        end
+    end
+    if self.reading_history_recovered then
+        table.insert(lines, "")
+        table.insert(lines, _("Recovered from the last valid backup."))
+    end
+    UIManager:show(InfoMessage:new({
+        text = table.concat(lines, "\n"),
+        timeout = 15,
+    }))
+    return true
+end
+
+local function writeReadingHistoryExport(path, content)
+    local file, temp_path = openExclusivePrivateTemp(path .. ".tmp.XXXXXX")
+    if not file then return false end
+    if not writeCompleteFile(file, content)
+        or readWholeFile(temp_path, ReadingHistory.MAX_BODY_BYTES + 1024) ~= content
+        or not commandSucceeded(os.execute(
+            "chmod 600 " .. util.shell_escape({ temp_path })))
+    then
+        os.remove(temp_path)
+        return false
+    end
+    local backup = path .. ".bak"
+    os.remove(backup)
+    if fileSystemObjectExists(path) and not os.rename(path, backup) then
+        os.remove(temp_path)
+        return false
+    end
+    if not os.rename(temp_path, path) then
+        os.remove(temp_path)
+        if fileSystemObjectExists(backup) then os.rename(backup, path) end
+        return false
+    end
+    os.remove(backup)
+    return true
+end
+
+function Goodreads:exportReadingHistory()
+    local state, load_detail = self:reloadReadingHistory()
+    if not state then
+        UIManager:show(InfoMessage:new({
+            text = string.format(
+                _("Private reading history is unavailable: %s"),
+                load_detail or _("unknown error")
+            ),
+            timeout = 6,
+        }))
+        return false
+    end
+    local generated_at = os.time()
+    local csv, csv_error = ReadingHistory.toCSV(state)
+    local json_export, json_error = ReadingHistory.toJSON(state, generated_at)
+    if not csv or not json_export then
+        return false, csv_error or json_error
+    end
+    local mkdir_status = os.execute(
+        "umask 077; mkdir -p "
+            .. util.shell_escape({ READING_HISTORY_EXPORT_DIR })
+            .. "; chmod 700 "
+            .. util.shell_escape({ READING_HISTORY_EXPORT_DIR }))
+    local json_ok = commandSucceeded(mkdir_status)
+        and writeReadingHistoryExport(READING_HISTORY_EXPORT_JSON, json_export)
+    local csv_ok = json_ok
+        and writeReadingHistoryExport(READING_HISTORY_EXPORT_CSV, csv)
+    UIManager:show(InfoMessage:new({
+        text = json_ok and csv_ok
+            and _("Private reading history exported as CSV and JSON in KOReader settings.")
+            or _("Could not export the complete private reading history."),
+        timeout = 6,
+    }))
+    self:debugLog("reading_history_export", {
+        trigger = "manual_export",
+        history_sequence = state.sequence,
+        history_sessions = ReadingHistory.metrics(state, generated_at).total_sessions,
+        status = json_ok and csv_ok and "exported" or "export_failed",
+        success = json_ok and csv_ok,
+    })
+    return json_ok and csv_ok
 end
 
 local function readAnnotationOutbox(asin)
@@ -2256,6 +3029,13 @@ function Goodreads:init()
     self.native_import_inflight = false
     self.native_import_retry_path = nil
     self.native_import_retry_event = nil
+    self.reading_history_fault_stage = nil
+    local history = self:reloadReadingHistory()
+    if not history then
+        logger.warn("GoodreadsNative: private reading history could not be loaded")
+    elseif self.reading_history_recovered then
+        logger.warn("GoodreadsNative: private reading history recovered from backup")
+    end
     self.ui.menu:registerToMainMenu(self)
     self:applyReaderHook()
     if not outbox_resume_scheduled then
@@ -2409,6 +3189,7 @@ function Goodreads:syncCapturedCheckpoint(asin, percent, status, trigger, resolv
         return false, "book has no syncable ASIN or progress"
     end
 
+    self:recordReadingHistory(asin, percent, status, trigger)
     local action = actionForState(percent, status)
     local whole_percent = percentageForProgress(percent)
     local override_changed, suppress_progress
@@ -3147,22 +3928,39 @@ function Goodreads:setCurrentBookShelf(action)
     end
     self:rememberAsin(asin)
     self:saveSettings()
+    local history_ok, history_detail = true, nil
+    if action == ACTION_READ then
+        local history_changed
+        history_changed, history_detail = self:completeReadingHistory(
+            asin, percent, "manual_shelf")
+        history_ok = history_changed or history_detail == "already completed"
+    elseif action == ACTION_READING then
+        local history_changed
+        history_changed, history_detail = self:activateReadingHistory(
+            asin, percent, "manual_shelf")
+        history_ok = history_changed or history_detail == "session already active"
+    end
     self:debugLog("manual_shelf_confirmed", {
         trigger = "manual_shelf",
         asin = asin,
         percent = percentageForProgress(percent),
         action = shelfActionName(action),
-        status = "confirmed_by_native_readback",
-        success = true,
+        status = history_ok and "confirmed_by_native_readback"
+            or "native_confirmed_local_history_failed",
+        success = history_ok,
     })
     UIManager:show(InfoMessage:new({
-        text = string.format(
-            _("Goodreads shelf confirmed: %s"),
-            shelfActionLabel(action)
-        ),
-        timeout = 4,
+        text = history_ok and string.format(
+                _("Goodreads shelf confirmed: %s"),
+                shelfActionLabel(action)
+            )
+            or string.format(
+                _("Goodreads shelf changed, but local history failed: %s"),
+                history_detail or _("unknown error")
+            ),
+        timeout = history_ok and 4 or 6,
     }))
-    return true
+    return history_ok
 end
 
 function Goodreads:syncCurrentBook()
@@ -3707,6 +4505,100 @@ function Goodreads:addToMainMenu(menu_items)
                         text = _("Read"),
                         callback = function()
                             self:setCurrentBookShelf(ACTION_READ)
+                        end,
+                    },
+                },
+            },
+            {
+                text = _("Private reading history"),
+                sub_item_table = {
+                    {
+                        text = _("Show reading stats"),
+                        callback = function()
+                            self:showReadingHistoryStats()
+                        end,
+                    },
+                    {
+                        text = _("Mark current session DNF…"),
+                        enabled_func = function()
+                            return self.ui and self.ui.document
+                        end,
+                        callback = function()
+                            self:showMarkDnfDialog()
+                        end,
+                    },
+                    {
+                        text = _("Undo DNF for current book"),
+                        enabled_func = function()
+                            return self.ui and self.ui.document
+                        end,
+                        callback = function()
+                            self:undoCurrentBookDnf()
+                        end,
+                    },
+                    {
+                        text = _("Start a separate reread"),
+                        enabled_func = function()
+                            return self.ui and self.ui.document
+                        end,
+                        callback = function()
+                            self:startCurrentBookReread()
+                        end,
+                    },
+                    {
+                        text = _("Annual reading goal"),
+                        sub_item_table = {
+                            {
+                                text = _("Off"),
+                                checked_func = function()
+                                    return self:getAnnualReadingGoal() == nil
+                                end,
+                                callback = function()
+                                    self:setAnnualReadingGoal(0)
+                                end,
+                            },
+                            {
+                                text = _("12 books"),
+                                checked_func = function()
+                                    return self:getAnnualReadingGoal() == 12
+                                end,
+                                callback = function()
+                                    self:setAnnualReadingGoal(12)
+                                end,
+                            },
+                            {
+                                text = _("24 books"),
+                                checked_func = function()
+                                    return self:getAnnualReadingGoal() == 24
+                                end,
+                                callback = function()
+                                    self:setAnnualReadingGoal(24)
+                                end,
+                            },
+                            {
+                                text = _("52 books"),
+                                checked_func = function()
+                                    return self:getAnnualReadingGoal() == 52
+                                end,
+                                callback = function()
+                                    self:setAnnualReadingGoal(52)
+                                end,
+                            },
+                            {
+                                text = _("100 books"),
+                                checked_func = function()
+                                    return self:getAnnualReadingGoal() == 100
+                                end,
+                                callback = function()
+                                    self:setAnnualReadingGoal(100)
+                                end,
+                            },
+                        },
+                    },
+                    {
+                        text = _("Export private CSV + JSON"),
+                        callback = function()
+                            self:exportReadingHistory()
                         end,
                     },
                 },

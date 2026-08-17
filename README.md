@@ -15,9 +15,12 @@ account token is required or stored.
 ## Features
 
 - Puts a book on `Currently Reading` after KOReader records progress.
-- Marks a book `Read` when KOReader completes it or reaches 99%.
+- Marks a book `Read` only when KOReader explicitly completes it or you choose
+  the native Read shelf; 99% remains `Currently Reading`.
 - Lets you explicitly choose `Want to Read`, `Currently Reading`, or `Read`
   through Kindle's native Goodreads bridge.
+- Keeps bounded private local first-read, reread, completion, and DNF sessions
+  with streak, pace, projected-finish, annual-goal, and export views.
 - Silently sends the live rounded whole-number percentage shortly after open,
   periodically while reading, on suspend/resume, and on close.
 - Runs KFX annotation-position translation in a detached worker, so page turns,
@@ -140,10 +143,13 @@ On close, the live position is captured before KOReader unloads the document.
 The delayed shell work survives a full KOReader exit and lets other close hooks
 finish their native content-database writes first.
 
-When the book is complete, KOReader displays a one-time rating chooser after
-returning to the file browser. The chosen 1–5 star value is submitted through
-the Kindle's native `rateABook` service. Rating `0` is exposed as **Clear
-rating**. The plugin never guesses a rating from reading behavior.
+When KOReader explicitly marks the document complete, it displays a one-time
+rating chooser after returning to the file browser. The chosen 1–5 star value
+is submitted through the Kindle's native `rateABook` service. Rating `0` is
+exposed as **Clear rating**. A manual Read shelf choice records local
+completion and enables **Rate last completed book…**; a percentage, including
+99%, never implies completion or a rating. The plugin never guesses a rating
+from reading behavior.
 
 You can also use **Rate current book…** while reading or **Rate last completed
 book…** from the file browser.
@@ -161,7 +167,48 @@ an unchanged periodic checkpoint cannot immediately reverse your choice.
 Selecting Want to Read or Read suppresses contradictory percentage writes while
 the book remains at the same whole-number percentage. New reading progress—or
 an explicit KOReader completion—consumes the override and resumes automatic
-shelf and percentage behavior. The override stores no title or account data.
+shelf and percentage behavior. A confirmed Read choice completes the active
+local history session. A confirmed Currently Reading choice starts an initial
+session or a separate reread when the previous session ended. The override
+stores no title or account data.
+
+## Private reading history
+
+Open **Goodreads (native Kindle sync) → Private reading history** to view local
+statistics, mark or undo DNF, start a separate reread, choose an annual
+completion goal, or export CSV and JSON.
+
+The history is local to this plugin. Kindle firmware 5.19.5 exposes native
+Goodreads writes only for Want to Read, Currently Reading, Read, percentage,
+and rating; it does not expose DNF, start/finish dates, reread sessions, goals,
+or statistics. The plugin therefore never claims those local facts reached
+Goodreads.
+
+Checksummed primary and backup state live under the root-only directory:
+
+```text
+/var/local/koreader-goodreads-native/
+```
+
+It contains only ASINs, timestamps, outcomes, percentages, and day keys—never
+titles, authors, paths, annotation text, account data, or device identifiers.
+Writes are serialized, bounded, and atomically replaced. A corrupt primary can
+recover from the last valid backup; if both copies are invalid, the feature
+fails closed instead of overwriting them. Lock and state readers accept only
+bounded regular files, while exclusive random temporary files prevent a stale
+or malformed filesystem object from blocking a reader hook or being reused.
+
+The explicit export action writes:
+
+```text
+/mnt/us/koreader/settings/goodreads_reading_history.csv
+/mnt/us/koreader/settings/goodreads_reading_history.json
+```
+
+Those user-facing files include ASINs and reading timestamps. They are not
+uploaded by the plugin, but `/mnt/us` is USB-visible and its FUSE filesystem
+does not provide a dependable POSIX privacy boundary. Treat the files as a
+private personal export and remove them when no longer needed.
 
 ## Diagnostics
 
@@ -401,6 +448,10 @@ make check
 make package
 ```
 
+On macOS, the scripts reject Apple's nonfunctional Java placeholders and also
+look in common Homebrew OpenJDK locations. `JAVA_HOME`, `JAVA`, `JAVAC`, and
+`JAR` remain available as explicit overrides.
+
 Artifacts are written to `dist/` with a SHA-256 checksum. GitHub Actions runs
 the same build and checks on every push and pull request.
 
@@ -421,6 +472,9 @@ framework logs in public issues.
   supported by the native service.
 - Native shelf selection is limited to Want to Read, Currently Reading, and
   Read. Custom shelves and DNF are not exposed by this firmware bridge.
+- Start/finish dates, reread sessions, DNF, streaks, goals, and history exports
+  are local-only; the firmware's native Goodreads bridge does not accept those
+  fields.
 - Native annotation synchronization requires an EPUB produced by the
   position-map-enabled Kindle converter; older cached conversions must be
   safely regenerated once.

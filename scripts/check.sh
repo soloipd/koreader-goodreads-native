@@ -122,6 +122,8 @@ if command -v shellcheck >/dev/null 2>&1; then
         "$plugin_dir/bin/manage-sync-receipts" \
         "$plugin_dir/bin/acknowledge-annotation-outbox" \
         "$project_root/tests/test_lifecycle_stress.sh" \
+        "$project_root/tests/test_history_lock_stress.sh" \
+        "$project_root/tests/test_package_privacy.sh" \
         "$project_root/scripts/build.sh" \
         "$project_root/scripts/check.sh" \
         "$project_root/scripts/package.sh"
@@ -129,6 +131,8 @@ fi
 
 "$project_root/tests/test_sync_receipts.sh"
 "$project_root/tests/test_annotation_lock.sh"
+"$project_root/tests/test_package_privacy.sh"
+"$project_root/tests/test_history_lock_stress.sh"
 
 lua_checker=""
 for candidate in luac5.1 luac lua5.1 luajit; do
@@ -144,6 +148,7 @@ case "$lua_checker" in
         "$lua_checker" -p "$plugin_dir/_meta.lua"
         "$lua_checker" -p "$plugin_dir/annotationoutbox.lua"
         "$lua_checker" -p "$plugin_dir/shelfstate.lua"
+        "$lua_checker" -p "$plugin_dir/readinghistory.lua"
         ;;
     lua5.1|luajit)
         LUA_CHECK_FILE="$plugin_dir/main.lua" \
@@ -153,6 +158,8 @@ case "$lua_checker" in
         LUA_CHECK_FILE="$plugin_dir/annotationoutbox.lua" \
             "$lua_checker" -e 'assert(loadfile(os.getenv("LUA_CHECK_FILE")))'
         LUA_CHECK_FILE="$plugin_dir/shelfstate.lua" \
+            "$lua_checker" -e 'assert(loadfile(os.getenv("LUA_CHECK_FILE")))'
+        LUA_CHECK_FILE="$plugin_dir/readinghistory.lua" \
             "$lua_checker" -e 'assert(loadfile(os.getenv("LUA_CHECK_FILE")))'
         ;;
     '')
@@ -172,10 +179,13 @@ if [ -n "$lua_runtime" ]; then
     outbox_test_root="$(mktemp -d)"
     trap 'rm -rf "$outbox_test_root"' EXIT HUP INT TERM
     PROJECT_ROOT="$project_root" GOODREADS_PRIVATE_STATE_DIR="$outbox_test_root" \
+        GOODREADS_HISTORY_EXPORT_DIR="$outbox_test_root/exports" \
+        GOODREADS_HISTORY_LOCK="$outbox_test_root/history.lock" \
         GOODREADS_SHA256_TOOL="$(command -v sha256sum)" \
         "$lua_runtime" "$project_root/tests/test_main.lua"
     PROJECT_ROOT="$project_root" "$lua_runtime" "$project_root/tests/test_annotation_outbox.lua"
     PROJECT_ROOT="$project_root" "$lua_runtime" "$project_root/tests/test_shelf_state.lua"
+    PROJECT_ROOT="$project_root" "$lua_runtime" "$project_root/tests/test_reading_history.lua"
     rm -rf "$outbox_test_root"
     trap - EXIT HUP INT TERM
 else
@@ -226,8 +236,10 @@ grep -Fqx 'Agent-Class: GoodreadsAnnotationExportAgentV3' <<<"$annotation_export
 grep -Fqx 'GoodreadsAnnotationExportAgentV3.class' <<<"$annotation_export_entries" \
     || { printf 'error: annotation export agent JAR lacks its main class\n' >&2; exit 1; }
 
-javac_bin="${JAVAC:-javac}"
-java_bin="${JAVA:-java}"
+# shellcheck source=java-toolchain.sh
+source "$project_root/scripts/java-toolchain.sh"
+javac_bin="$(goodreads_find_java_tool "${JAVAC:-}" javac || true)"
+java_bin="$(goodreads_find_java_tool "${JAVA:-}" java || true)"
 annotation_test_dir="$project_root/agent/build/annotation-tests"
 annotation_test_sources=()
 while IFS= read -r source; do
@@ -236,7 +248,7 @@ done < <(find "$project_root/agent/testsrc" -type f -name '*.java' \
     ! -name 'GoodreadsAnnotationAgentV27Test.java' \
     ! -name 'GoodreadsAnnotationExportAgentV2Test.java' | sort)
 
-if command -v "$javac_bin" >/dev/null 2>&1 && command -v "$java_bin" >/dev/null 2>&1; then
+if [ -n "$javac_bin" ] && [ -n "$java_bin" ]; then
     rm -rf "$annotation_test_dir"
     mkdir -p "$annotation_test_dir"
     "$javac_bin" --release 8 -Xlint:-options -d "$annotation_test_dir" \

@@ -24,6 +24,20 @@ the native `Shelf` enum. Its write path returns the current shelf after the
 native transaction, which allows an exact response check without reading or
 storing the Amazon session.
 
+## Goodreads lifecycle boundary
+
+The tested firmware's `LibraryBookJSON` serializes shelf, star rating, and book
+URI. Its mutable library-book object also exposes an internal last-updated
+timestamp, but neither surface provides writable reading start/finish dates,
+DNF, reread sessions, annual goals, streaks, or pace. The native shelf handler
+accepts only Want to Read, Currently Reading, and Read.
+
+Accordingly, v0.11 keeps lifecycle dates, rereads, DNF, statistics, goals, and
+CSV/JSON history entirely local. A native shelf response can confirm the shelf
+transaction; it cannot confirm those local fields reached Goodreads. Future
+firmware support must be independently inspected and read back before this
+boundary is widened.
+
 ## Progress request
 
 - Request class:

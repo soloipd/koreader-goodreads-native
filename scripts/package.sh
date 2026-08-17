@@ -3,21 +3,50 @@
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+plugin_dir="$project_root/goodreads.koplugin"
 version="$(tr -d '[:space:]' < "$project_root/VERSION")"
 dist_dir="$project_root/dist"
 archive="$dist_dir/goodreads-native-koreader-v$version.zip"
 checksum_file="$archive.sha256"
+
+if find "$plugin_dir" -type l -print -quit | grep -q .; then
+    printf 'error: plugin source contains a symbolic link\n' >&2
+    exit 1
+fi
+
+if find "$plugin_dir" \
+    \( -name 'reading-history-v1*' \
+       -o -name 'goodreads_reading_history.csv*' \
+       -o -name 'goodreads_reading_history.json*' \) \
+    -print -quit | grep -q .; then
+    printf 'error: plugin source contains private reading-history data\n' >&2
+    exit 1
+fi
 
 mkdir -p "$dist_dir"
 rm -f "$archive" "$checksum_file"
 
 (
     cd "$project_root"
-    zip -qr "$archive" goodreads.koplugin \
-        -x '*/.DS_Store' '*.bak' '*.log'
+    find goodreads.koplugin -type f \
+        ! -name '.DS_Store' \
+        ! -name '*.bak' \
+        ! -name '*.log' \
+        ! -name 'reading-history-v1*' \
+        ! -name 'goodreads_reading_history.csv*' \
+        ! -name 'goodreads_reading_history.json*' \
+        -print \
+        | LC_ALL=C sort \
+        | zip -Xq "$archive" -@
 )
 
 unzip -tq "$archive"
+archive_entries="$(unzip -Z1 "$archive")"
+if grep -Eq '(^|/)(reading-history-v1[^/]*|goodreads_reading_history\.(csv|json)[^/]*)$' \
+    <<<"$archive_entries"; then
+    printf 'error: private reading-history data would be packaged\n' >&2
+    exit 1
+fi
 
 if command -v sha256sum >/dev/null 2>&1; then
     (

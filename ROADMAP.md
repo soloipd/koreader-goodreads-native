@@ -144,15 +144,26 @@ local and Amazon Notebook create/delete readback and a firmware allowlist.
 - Silent live percentage checkpoints with deduplication.
 - Explicit 1–5-star rating and rating removal.
 - Native queue acceptance diagnostics and retryable errors.
+- Exact-readback native selection for Want to Read, Currently Reading, and
+  Read.
 
-### Next
+### Done — private local reading lifecycle
 
-- Start/finish dates, rereads, explicit DNF, and shelf selection.
-- Distinguish 99% from complete and never infer a rating.
-- Local streaks, pace, projected finish, annual goals, and private CSV/JSON
+- Checksummed local start/finish dates, rereads, explicit undoable DNF, and
+  idempotent manual completion.
+- Ninety-nine percent remains active; only explicit completion can mark Read
+  or offer a rating.
+- Local streaks, pace, projected finish, annual goals, and constrained CSV/JSON
   session-history export.
+- v0.11 passed host behavior, privacy, package, fault-injection, 64-writer, and
+  1,000-process release stress, followed by a graceful on-device upgrade,
+  isolated ARM/BusyBox contention smoke test, framebuffer inspection, and a
+  sustained single-reader/watcher health watch without a freeze or power-event
+  regression.
 
-Goodreads remains responsible for shelves, progress, dates, and ratings.
+Goodreads remains responsible for cloud shelves, progress, and ratings. The
+tested native bridge exposes no DNF, lifecycle-date, or reread write surface,
+so those facts remain local and are never reported as cloud-synced.
 Highlight text belongs to Amazon Notebook or an explicitly connected export.
 
 ## Kindle-native operations
