@@ -110,8 +110,13 @@ replay_reader_start() {
     # the native agent, so a cloud placeholder or different book fails closed.
     attempt=0
     while pending_exists && [ "$attempt" -lt 3 ]; do
+        case "$attempt" in
+            0) settle_us=200000 ;;
+            1) settle_us=600000 ;;
+            *) settle_us=1200000 ;;
+        esac
         if [ -x "$USLEEP_BIN" ]; then
-            "$USLEEP_BIN" 100000
+            "$USLEEP_BIN" "$settle_us"
         fi
         replay_pending || true
         attempt=$((attempt + 1))

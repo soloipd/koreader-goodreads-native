@@ -148,7 +148,7 @@ cat >"$dbus_plugin/bin/sync-annotations" <<EOF
 #!/bin/sh
 printf 'sync\n' >>'$test_root/dbus-sync-calls'
 rm -f "\$1"
-[ "\$(wc -l <'$test_root/dbus-sync-calls' | tr -d '[:space:]')" -ge 2 ]
+[ "\$(wc -l <'$test_root/dbus-sync-calls' | tr -d '[:space:]')" -ge 3 ]
 EOF
 cat >"$test_root/dbus-monitor" <<'EOF'
 #!/bin/sh
@@ -162,8 +162,9 @@ cat >"$test_root/dbus-timeout" <<'EOF'
 shift
 exec "$@"
 EOF
-cat >"$test_root/dbus-usleep" <<'EOF'
+cat >"$test_root/dbus-usleep" <<EOF
 #!/bin/sh
+printf '%s\n' "\$1" >>'$test_root/dbus-sleep-calls'
 exit 0
 EOF
 chmod 0755 "$dbus_plugin/bin/sync-annotations" "$test_root/dbus-monitor" \
@@ -182,7 +183,9 @@ GOODREADS_PLUGIN_DIR="$dbus_plugin" GOODREADS_SETTINGS_DIR="$watch_settings" \
     GOODREADS_TIMEOUT_BIN="$test_root/dbus-timeout" \
     GOODREADS_USLEEP_BIN="$test_root/dbus-usleep" \
     "$project_root/goodreads.koplugin/bin/watch-pending-annotations"
-test "$(wc -l <"$test_root/dbus-sync-calls" | tr -d '[:space:]')" = 2
+test "$(wc -l <"$test_root/dbus-sync-calls" | tr -d '[:space:]')" = 3
+printf '%s\n' 200000 600000 >"$test_root/expected-dbus-sleeps"
+cmp -s "$test_root/expected-dbus-sleeps" "$test_root/dbus-sleep-calls"
 test ! -e "$dbus_pending/$asin"
 
 # Acknowledgement is compare-and-delete: a matching snapshot is removed, a
