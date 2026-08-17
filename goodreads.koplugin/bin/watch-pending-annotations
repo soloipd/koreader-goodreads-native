@@ -15,6 +15,9 @@ LOCK_ROOT="${GOODREADS_LOCK_DIR:-/tmp}"
 WATCH_LOCK="$LOCK_ROOT/goodreads-annotation-watcher.lock"
 LIPC_WAIT_EVENT="${GOODREADS_LIPC_WAIT_EVENT:-/usr/bin/lipc-wait-event}"
 LIPC_GET_PROP="${GOODREADS_LIPC_GET_PROP:-/usr/bin/lipc-get-prop}"
+DBUS_MONITOR="${GOODREADS_DBUS_MONITOR:-/usr/bin/dbus-monitor}"
+TIMEOUT_BIN="${GOODREADS_TIMEOUT_BIN:-/usr/bin/timeout}"
+USLEEP_BIN="${GOODREADS_USLEEP_BIN:-/usr/bin/usleep}"
 BOOK_LOCK_ROOT="$LOCK_ROOT"
 TMP_ROOT="${GOODREADS_TMP_DIR:-/tmp}"
 
@@ -95,6 +98,50 @@ replay_pending() {
     return "$found"
 }
 
+pending_exists() {
+    find "$PENDING_DIR" -maxdepth 1 -type f -name 'B?????????' 2>/dev/null \
+        | grep -q .
+}
+
+replay_reader_start() {
+    # appStarted is emitted just before this firmware releases ReaderSDK's
+    # exact KFX handle. Give the SDK a brief settling window, then make at most
+    # three closely bounded attempts. The exact ASIN/path checks remain inside
+    # the native agent, so a cloud placeholder or different book fails closed.
+    attempt=0
+    while pending_exists && [ "$attempt" -lt 3 ]; do
+        if [ -x "$USLEEP_BIN" ]; then
+            "$USLEEP_BIN" 100000
+        fi
+        replay_pending || true
+        attempt=$((attempt + 1))
+    done
+}
+
+listen_for_reader_start() {
+    [ -x "$DBUS_MONITOR" ] && [ -x "$TIMEOUT_BIN" ] || return 1
+    awaiting_app_name=0
+    "$TIMEOUT_BIN" 30 "$DBUS_MONITOR" --system \
+        "type='signal',interface='com.lab126.appmgrd',member='appStarted'" \
+        2>/dev/null | while IFS= read -r line; do
+            case "$line" in
+                *'interface=com.lab126.appmgrd; member=appStarted'*)
+                    awaiting_app_name=1
+                    ;;
+                *'string "com.lab126.booklet.reader"'*)
+                    if [ "$awaiting_app_name" -eq 1 ]; then
+                        replay_reader_start
+                        pending_exists || break
+                    fi
+                    awaiting_app_name=0
+                    ;;
+                signal*)
+                    awaiting_app_name=0
+                    ;;
+            esac
+        done
+}
+
 if [ -n "$once_asin" ]; then
     replay_pending || true
     exit 0
@@ -104,10 +151,18 @@ fi
 # activating, so try once before blocking for the next application start.
 replay_pending || true
 
+# KPPMainApp remains resident on newer firmware, so LIPC appStarted can miss
+# the short-lived ReaderSDK handle even though the system DBus appStarted
+# signal is emitted. A filtered DBus listener sleeps in the kernel and wakes at
+# the exact reader handoff; the bounded loop lets us notice external success or
+# a monitor restart without polling the device continuously.
+while pending_exists && [ -x "$DBUS_MONITOR" ] && [ -x "$TIMEOUT_BIN" ]; do
+    listen_for_reader_start || true
+done
+
 last_active_app=""
 active_attempts=0
-while find "$PENDING_DIR" -maxdepth 1 -type f -name 'B?????????' 2>/dev/null \
-    | grep -q .; do
+while pending_exists; do
     event_seen=0
     if "$LIPC_WAIT_EVENT" -s 15 com.lab126.appmgrd appStarted >/dev/null 2>&1; then
         event_seen=1

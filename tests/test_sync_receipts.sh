@@ -129,11 +129,61 @@ EOF
 GOODREADS_PLUGIN_DIR="$poll_plugin" GOODREADS_SETTINGS_DIR="$watch_settings" \
     GOODREADS_PRIVATE_STATE_DIR="$poll_private" \
     GOODREADS_LOCK_DIR="$test_root/poll-lock" GOODREADS_TMP_DIR="$test_root/poll-tmp" \
+    GOODREADS_DBUS_MONITOR="$test_root/missing-dbus-monitor" \
     GOODREADS_LIPC_WAIT_EVENT="$test_root/poll-wait-event" \
     GOODREADS_LIPC_GET_PROP="$test_root/poll-get-prop" \
     "$project_root/goodreads.koplugin/bin/watch-pending-annotations"
 test "$(wc -l <"$test_root/poll-sync-calls" | tr -d '[:space:]')" = 2
 test ! -e "$poll_pending/$asin"
+
+# KPP firmware emits the useful reader start over system DBus while the Java
+# ReaderSDK handle is still exact. The filtered listener must wake immediately,
+# retry a failed initial probe, and consume the snapshot without LIPC polling.
+dbus_plugin="$test_root/dbus-plugin"
+dbus_private="$test_root/dbus-private"
+dbus_pending="$dbus_private/annotation-pending"
+mkdir -p "$dbus_plugin/bin" "$dbus_pending" "$test_root/dbus-tmp" \
+    "$test_root/dbus-lock"
+cat >"$dbus_plugin/bin/sync-annotations" <<EOF
+#!/bin/sh
+printf 'sync\n' >>'$test_root/dbus-sync-calls'
+rm -f "\$1"
+[ "\$(wc -l <'$test_root/dbus-sync-calls' | tr -d '[:space:]')" -ge 2 ]
+EOF
+cat >"$test_root/dbus-monitor" <<'EOF'
+#!/bin/sh
+printf '%s\n' \
+    'signal sender=:1.14 -> dest=(null destination) serial=1 path=/default; interface=com.lab126.appmgrd; member=appStarted' \
+    '   string "com.lab126.booklet.reader"' \
+    '   string ""'
+EOF
+cat >"$test_root/dbus-timeout" <<'EOF'
+#!/bin/sh
+shift
+exec "$@"
+EOF
+cat >"$test_root/dbus-usleep" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod 0755 "$dbus_plugin/bin/sync-annotations" "$test_root/dbus-monitor" \
+    "$test_root/dbus-timeout" "$test_root/dbus-usleep"
+cat >"$dbus_pending/$asin" <<EOF
+version=1
+asin=$asin
+request_id=1
+retry_count=0
+desired_count=0
+EOF
+GOODREADS_PLUGIN_DIR="$dbus_plugin" GOODREADS_SETTINGS_DIR="$watch_settings" \
+    GOODREADS_PRIVATE_STATE_DIR="$dbus_private" \
+    GOODREADS_LOCK_DIR="$test_root/dbus-lock" GOODREADS_TMP_DIR="$test_root/dbus-tmp" \
+    GOODREADS_DBUS_MONITOR="$test_root/dbus-monitor" \
+    GOODREADS_TIMEOUT_BIN="$test_root/dbus-timeout" \
+    GOODREADS_USLEEP_BIN="$test_root/dbus-usleep" \
+    "$project_root/goodreads.koplugin/bin/watch-pending-annotations"
+test "$(wc -l <"$test_root/dbus-sync-calls" | tr -d '[:space:]')" = 2
+test ! -e "$dbus_pending/$asin"
 
 # Acknowledgement is compare-and-delete: a matching snapshot is removed, a
 # superseding snapshot is restored, and a snapshot created after the atomic
