@@ -1,8 +1,8 @@
 # Goodreads Native Sync for KOReader on Kindle
 
 An experimental KOReader plugin for jailbroken Kindles that syncs Goodreads
-shelf state, **live reading percentage, and explicit star ratings** through the
-Kindle's existing Amazon/Goodreads session.
+shelf state, **live reading percentage, manual shelf choices, and explicit star
+ratings** through the Kindle's existing Amazon/Goodreads session.
 
 No Goodreads API key, Goodreads password, Amazon cookie, or manually supplied
 account token is required or stored.
@@ -16,6 +16,8 @@ account token is required or stored.
 
 - Puts a book on `Currently Reading` after KOReader records progress.
 - Marks a book `Read` when KOReader completes it or reaches 99%.
+- Lets you explicitly choose `Want to Read`, `Currently Reading`, or `Read`
+  through Kindle's native Goodreads bridge.
 - Silently sends the live rounded whole-number percentage shortly after open,
   periodically while reading, on suspend/resume, and on close.
 - Runs KFX annotation-position translation in a detached worker, so page turns,
@@ -145,6 +147,21 @@ rating**. The plugin never guesses a rating from reading behavior.
 
 You can also use **Rate current book…** while reading or **Rate last completed
 book…** from the file browser.
+
+## Manual shelf selection
+
+With an ASIN-backed book open, choose **Goodreads (native Kindle sync) → Set
+Goodreads shelf…** and select **Want to Read**, **Currently Reading**, or
+**Read**. These are the three canonical shelves exposed by the tested Kindle
+firmware.
+
+A manual selection is reported as successful only when the native Kindle
+response names that exact shelf. The plugin stores a bounded local override so
+an unchanged periodic checkpoint cannot immediately reverse your choice.
+Selecting Want to Read or Read suppresses contradictory percentage writes while
+the book remains at the same whole-number percentage. New reading progress—or
+an explicit KOReader completion—consumes the override and resumes automatic
+shelf and percentage behavior. The override stores no title or account data.
 
 ## Diagnostics
 
@@ -402,6 +419,8 @@ framework logs in public issues.
 - Goodreads receives integer percentages, matching Amazon's native request.
 - Goodreads ratings are whole stars from 1–5; half-star ratings are not
   supported by the native service.
+- Native shelf selection is limited to Want to Read, Currently Reading, and
+  Read. Custom shelves and DNF are not exposed by this firmware bridge.
 - Native annotation synchronization requires an EPUB produced by the
   position-map-enabled Kindle converter; older cached conversions must be
   safely regenerated once.

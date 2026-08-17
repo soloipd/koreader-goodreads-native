@@ -7,7 +7,7 @@ reading percentage, and ratings are not handled by one service.
 flowchart LR
     A["KOReader opens, reads, suspends, resumes, or closes an ASIN-backed book"] --> B["Read live ReaderPaging or ReaderRolling percentage"]
     B --> C["KAF LIPC shelf action"]
-    C --> D["Currently Reading or Read"]
+    C --> D["Want to Read, Currently Reading, or Read"]
     B --> E["Delayed sync-progress helper"]
     E --> F["AttachLauncher via jdk.attach"]
     F --> G["GoodreadsProgressAgentV2 in Kindle framework"]
@@ -50,7 +50,18 @@ authoritative source; persisted `percent_finished` is only a fallback.
 
 The shelf path invokes `lipc-hash-prop` on the Kindle publisher
 `com.lab126.kppkaf`, property `kppAddToGoodreadShelf`. Inputs are selected from
-fixed actions and a strict ASIN allowlist.
+the firmware's three fixed canonical actions and a strict ASIN allowlist.
+
+Manual shelf selection validates the handler's returned current-shelf action
+against the exact requested action. Substring matches are insufficient because
+the native Read action is a prefix of Currently Reading. Only a confirmed
+response creates the local receipt and explicit-choice override.
+
+`shelfstate.lua` keeps at most 64 overrides. Each contains only the ASIN, fixed
+native action, whole-number baseline percentage, and timestamp. An unchanged
+checkpoint preserves the explicit choice. A changed percentage or a newly
+completed book consumes it and resumes automatic shelf policy. Want to Read and
+manual Read suppress percentage writes while their baseline remains unchanged.
 
 ## Rating synchronization
 
