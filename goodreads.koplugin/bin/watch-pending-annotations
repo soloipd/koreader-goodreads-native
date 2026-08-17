@@ -17,7 +17,7 @@ LIPC_WAIT_EVENT="${GOODREADS_LIPC_WAIT_EVENT:-/usr/bin/lipc-wait-event}"
 LIPC_GET_PROP="${GOODREADS_LIPC_GET_PROP:-/usr/bin/lipc-get-prop}"
 DBUS_MONITOR="${GOODREADS_DBUS_MONITOR:-/usr/bin/dbus-monitor}"
 TIMEOUT_BIN="${GOODREADS_TIMEOUT_BIN:-/usr/bin/timeout}"
-USLEEP_BIN="${GOODREADS_USLEEP_BIN:-/usr/bin/usleep}"
+USLEEP_BIN="${GOODREADS_USLEEP_BIN:-/bin/usleep}"
 BOOK_LOCK_ROOT="$LOCK_ROOT"
 TMP_ROOT="${GOODREADS_TMP_DIR:-/tmp}"
 
