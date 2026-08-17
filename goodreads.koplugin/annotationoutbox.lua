@@ -32,6 +32,34 @@ local function hexDecode(value, maximum)
     end))
 end
 
+-- Compare only the user-visible annotation intent. Delivery metadata such as
+-- trigger, sequence, retry attempt, and capture time must not turn an
+-- unchanged close-time snapshot into newer work.
+function Outbox.sameSnapshot(left, right)
+    if type(left) ~= "table" or type(right) ~= "table"
+        or left.asin ~= right.asin
+        or left.epub_path ~= right.epub_path
+        or left.native_path ~= right.native_path
+        or type(left.desired) ~= "table"
+        or type(right.desired) ~= "table"
+        or #left.desired ~= #right.desired
+    then
+        return false
+    end
+    for index = 1, #left.desired do
+        local left_item = left.desired[index]
+        local right_item = right.desired[index]
+        if type(left_item) ~= "table" or type(right_item) ~= "table"
+            or left_item.start ~= right_item.start
+            or left_item.finish ~= right_item.finish
+            or left_item.note ~= right_item.note
+        then
+            return false
+        end
+    end
+    return true
+end
+
 function Outbox.encode(snapshot, sequence, created_at)
     if type(snapshot) ~= "table" or not isAsin(snapshot.asin)
         or not integer(sequence, 1, 9007199254740991)

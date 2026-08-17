@@ -95,6 +95,46 @@ GOODREADS_PLUGIN_DIR="$watch_plugin" GOODREADS_SETTINGS_DIR="$watch_settings" \
 grep -Fqx 'retry_count=3' "$test_root/watcher-payload"
 test -e "$watch_pending/$asin"
 
+# Some firmware keeps KPPMainApp alive and therefore emits no appStarted event
+# when a native book opens. A timed activeApp check must still replay the
+# pending snapshot, while retaining it after the initial inactive attempt.
+poll_plugin="$test_root/poll-plugin"
+poll_private="$test_root/poll-private"
+poll_pending="$poll_private/annotation-pending"
+mkdir -p "$poll_plugin/bin" "$poll_pending" "$test_root/poll-tmp" \
+    "$test_root/poll-lock"
+cat >"$poll_plugin/bin/sync-annotations" <<EOF
+#!/bin/sh
+printf 'sync\n' >>'$test_root/poll-sync-calls'
+rm -f "\$1"
+[ "\$(wc -l <'$test_root/poll-sync-calls' | tr -d '[:space:]')" -ge 2 ]
+EOF
+cat >"$test_root/poll-wait-event" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+cat >"$test_root/poll-get-prop" <<'EOF'
+#!/bin/sh
+printf '%s\n' com.lab126.booklet.reader
+EOF
+chmod 0755 "$poll_plugin/bin/sync-annotations" "$test_root/poll-wait-event" \
+    "$test_root/poll-get-prop"
+cat >"$poll_pending/$asin" <<EOF
+version=1
+asin=$asin
+request_id=1
+retry_count=0
+desired_count=0
+EOF
+GOODREADS_PLUGIN_DIR="$poll_plugin" GOODREADS_SETTINGS_DIR="$watch_settings" \
+    GOODREADS_PRIVATE_STATE_DIR="$poll_private" \
+    GOODREADS_LOCK_DIR="$test_root/poll-lock" GOODREADS_TMP_DIR="$test_root/poll-tmp" \
+    GOODREADS_LIPC_WAIT_EVENT="$test_root/poll-wait-event" \
+    GOODREADS_LIPC_GET_PROP="$test_root/poll-get-prop" \
+    "$project_root/goodreads.koplugin/bin/watch-pending-annotations"
+test "$(wc -l <"$test_root/poll-sync-calls" | tr -d '[:space:]')" = 2
+test ! -e "$poll_pending/$asin"
+
 # Acknowledgement is compare-and-delete: a matching snapshot is removed, a
 # superseding snapshot is restored, and a snapshot created after the atomic
 # move survives successful acknowledgement of the older request.

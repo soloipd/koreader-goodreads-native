@@ -14,6 +14,7 @@ LEGACY_PENDING_DIR="$SETTINGS_DIR/goodreads_native_annotations_pending"
 LOCK_ROOT="${GOODREADS_LOCK_DIR:-/tmp}"
 WATCH_LOCK="$LOCK_ROOT/goodreads-annotation-watcher.lock"
 LIPC_WAIT_EVENT="${GOODREADS_LIPC_WAIT_EVENT:-/usr/bin/lipc-wait-event}"
+LIPC_GET_PROP="${GOODREADS_LIPC_GET_PROP:-/usr/bin/lipc-get-prop}"
 BOOK_LOCK_ROOT="$LOCK_ROOT"
 TMP_ROOT="${GOODREADS_TMP_DIR:-/tmp}"
 
@@ -103,10 +104,30 @@ fi
 # activating, so try once before blocking for the next application start.
 replay_pending || true
 
+last_active_app=""
+active_attempts=0
 while find "$PENDING_DIR" -maxdepth 1 -type f -name 'B?????????' 2>/dev/null \
     | grep -q .; do
-    "$LIPC_WAIT_EVENT" com.lab126.appmgrd appStarted >/dev/null 2>&1 || exit 0
-    replay_pending || true
+    event_seen=0
+    if "$LIPC_WAIT_EVENT" -s 15 com.lab126.appmgrd appStarted >/dev/null 2>&1; then
+        event_seen=1
+    fi
+    active_app=""
+    if [ -x "$LIPC_GET_PROP" ]; then
+        active_app="$(
+            "$LIPC_GET_PROP" com.lab126.appmgrd activeApp 2>/dev/null \
+                | sed -n '1p'
+        )"
+    fi
+    if [ "$active_app" != "$last_active_app" ]; then
+        active_attempts=0
+    fi
+    if [ "$active_app" = "com.lab126.booklet.reader" ] \
+        && { [ "$event_seen" -eq 1 ] || [ "$active_attempts" -lt 3 ]; }; then
+        replay_pending || true
+        active_attempts=$((active_attempts + 1))
+    fi
+    last_active_app="$active_app"
 done
 
 exit 0

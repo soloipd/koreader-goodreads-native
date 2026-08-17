@@ -107,6 +107,10 @@ grep -Fq 'failed_stage=wait_for_active_book' "$plugin_dir/bin/sync-annotations" 
     || { printf 'error: inactive native-book requests are not queued for replay\n' >&2; exit 1; }
 grep -Fq 'com.lab126.appmgrd appStarted' "$plugin_dir/bin/watch-pending-annotations" \
     || { printf 'error: pending annotation watcher does not wait for native-reader activation\n' >&2; exit 1; }
+grep -Fq 'com.lab126.appmgrd activeApp' "$plugin_dir/bin/watch-pending-annotations" \
+    || { printf 'error: pending annotation watcher cannot detect an eventless native-reader activation\n' >&2; exit 1; }
+grep -Fq 'translated_snapshot_already_pending' "$plugin_dir/main.lua" \
+    || { printf 'error: unchanged close snapshots can supersede translated pending work\n' >&2; exit 1; }
 grep -Fq "'local_success=true' 'sync_enqueued=false' 'success=false'" \
     "$plugin_dir/bin/sync-annotations" \
     || { printf 'error: enqueue failure is not reflected in overall success\n' >&2; exit 1; }

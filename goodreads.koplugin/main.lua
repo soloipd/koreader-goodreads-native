@@ -1402,6 +1402,38 @@ local function readAnnotationOutbox(asin)
     return snapshot
 end
 
+local function pendingReferencesAnnotationOutbox(snapshot)
+    if type(snapshot) ~= "table" or not isAsin(snapshot.asin)
+        or type(snapshot.sequence) ~= "number"
+        or type(snapshot.outbox_checksum) ~= "string"
+    then
+        return false
+    end
+    local path = ANNOTATION_PENDING_DIR .. "/" .. snapshot.asin
+    if not isRegularFileNoFollow(path) then
+        return false
+    end
+    local content = readWholeFile(path, 1024 * 1024)
+    if not content then
+        return false
+    end
+    local identity = {}
+    for line in content:gmatch("[^\r\n]+") do
+        local key, value = line:match("^([a-z_]+)=(.*)$")
+        if key == "asin" or key == "outbox_sequence"
+            or key == "outbox_checksum"
+        then
+            if identity[key] ~= nil then
+                return false
+            end
+            identity[key] = value
+        end
+    end
+    return identity.asin == snapshot.asin
+        and identity.outbox_sequence == tostring(snapshot.sequence)
+        and identity.outbox_checksum == snapshot.outbox_checksum
+end
+
 local function persistAnnotationOutbox(snapshot, fault_stage)
     local mkdir_status = os.execute(
         "umask 077; mkdir -p " .. util.shell_escape({ ANNOTATION_OUTBOX_DIR })
@@ -1413,10 +1445,21 @@ local function persistAnnotationOutbox(snapshot, fault_stage)
     if mkdir_status ~= 0 then
         return false, "cannot create private outbox"
     end
+    snapshot.outbox_unchanged = nil
     local sequence = tonumber(readFirstLine(ANNOTATION_SEQUENCE_DIR .. "/" .. snapshot.asin)) or 0
     local existing = readAnnotationOutbox(snapshot.asin)
     if existing and existing.sequence > sequence then
         sequence = existing.sequence
+    end
+    if existing and sequence == existing.sequence
+        and AnnotationOutbox.sameSnapshot(existing, snapshot)
+        and pendingReferencesAnnotationOutbox(existing)
+    then
+        snapshot.sequence = existing.sequence
+        snapshot.token = existing.sequence
+        snapshot.outbox_checksum = existing.outbox_checksum
+        snapshot.outbox_unchanged = true
+        return true
     end
     sequence = sequence + 1
     local body, encode_error = AnnotationOutbox.encode(snapshot, sequence, os.time())
@@ -1857,6 +1900,16 @@ function Goodreads:queueAnnotationSnapshot(snapshot)
             status = "native_import_must_resolve_first",
         })
         return false, "native import must resolve before queued outbound snapshot"
+    end
+    if snapshot.outbox_unchanged then
+        self:debugLog("annotations_sync_coalesced", {
+            trigger = snapshot.trigger,
+            asin = snapshot.asin,
+            annotations = type(snapshot.desired) == "table" and #snapshot.desired or 0,
+            attempt = snapshot.attempt,
+            status = "translated_snapshot_already_pending",
+        })
+        return true, "already_pending"
     end
     if self.annotation_sync_inflight then
         self:enqueuePendingAnnotationSnapshot(snapshot)

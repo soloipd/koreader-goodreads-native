@@ -22,6 +22,15 @@ local decoded = assert(Outbox.parse(split_body, snapshot.asin))
 assert(decoded.sequence == 42 and decoded.created_at == 1000, "sequence metadata must round-trip")
 assert(decoded.desired[2].note == "private note", "note must round-trip only after validated parsing")
 assert(decoded.desired[1].start == snapshot.desired[1].start, "range must round-trip")
+assert(Outbox.sameSnapshot(snapshot, decoded),
+    "delivery metadata must not make an unchanged annotation snapshot different")
+decoded.desired[2].note = "edited private note"
+assert(not Outbox.sameSnapshot(snapshot, decoded),
+    "a note edit must produce a new semantic annotation snapshot")
+decoded.desired[2].note = snapshot.desired[2].note
+decoded.desired[1].finish = "/body/p[1].9"
+assert(not Outbox.sameSnapshot(snapshot, decoded),
+    "a range edit must produce a new semantic annotation snapshot")
 
 assert(not Outbox.parse(split_body, "B099999999"), "ASIN mismatch must be rejected")
 assert(not Outbox.split(packed .. "extra=true\n"), "trailing fields must be rejected")

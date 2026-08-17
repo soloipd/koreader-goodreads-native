@@ -1212,6 +1212,11 @@ local first = snapshot("B0FLB24198", 1, "reader_ready")
 local stale = snapshot("B0FLB24198", 2, "annotations_modified")
 local latest = snapshot("B0FLB24198", 3, "close")
 local other = snapshot("B012345678", 1, "close")
+local already_pending = snapshot("B099999999", 1, "close")
+already_pending.outbox_unchanged = true
+local pending_queued, pending_detail = durable:queueAnnotationSnapshot(already_pending)
+assert(pending_queued and pending_detail == "already_pending" and #started == 0,
+    "an already-translated pending snapshot must not start redundant close-time work")
 assert(durable:queueAnnotationSnapshot(first), "first annotation snapshot should start")
 assert(durable:queueAnnotationSnapshot(stale), "overlapping snapshot should coalesce")
 assert(durable:queueAnnotationSnapshot(latest), "newest snapshot should replace stale queued work")
@@ -1358,6 +1363,25 @@ local storage_snapshot = {
 }
 assert(storage_plugin:persistAnnotationOutbox(storage_snapshot))
 assert(storage_snapshot.sequence == 1, "first durable sequence must be one")
+
+local translated_pending_dir = private_root .. "/annotation-pending"
+original_execute("mkdir -p " .. translated_pending_dir)
+local translated_pending = assert(io.open(
+    translated_pending_dir .. "/B012345678", "w"))
+translated_pending:write(
+    "version=1\n",
+    "asin=B012345678\n",
+    "outbox_sequence=1\n",
+    "outbox_checksum=", storage_snapshot.outbox_checksum, "\n"
+)
+translated_pending:close()
+storage_snapshot.trigger = "close"
+assert(storage_plugin:persistAnnotationOutbox(storage_snapshot))
+assert(storage_snapshot.sequence == 1 and storage_snapshot.outbox_unchanged,
+    "unchanged close must reuse the translated pending snapshot without superseding it")
+os.remove(translated_pending_dir .. "/B012345678")
+storage_snapshot.outbox_unchanged = nil
+storage_snapshot.trigger = "fault_test"
 
 local interrupted = assert(io.open(outbox_dir .. "/B012345678.interrupted", "w"))
 interrupted:write("partial write")
