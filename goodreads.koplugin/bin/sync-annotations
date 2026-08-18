@@ -8,13 +8,14 @@ set -u
 
 JAVA_BIN="/usr/java/bin/java"
 PLUGIN_DIR="/mnt/us/koreader/plugins/goodreads.koplugin"
-AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v30.jar"
+AGENT_JAR="$PLUGIN_DIR/bin/goodreads-annotation-agent-v31.jar"
 LAUNCHER_CLASSES="$PLUGIN_DIR/bin/classes"
 STATE_DIR="/mnt/us/koreader/settings/goodreads_native_annotations"
 PENDING_DIR="/var/local/koreader-goodreads-native/annotation-pending"
 RECEIPT_DIR="/mnt/us/koreader/settings/goodreads_native_sync_receipts"
 OUTBOX_DIR="/var/local/koreader-goodreads-native/annotation-outbox"
 OUTBOX_ACK_HELPER="$PLUGIN_DIR/bin/acknowledge-annotation-outbox"
+IDENTITY_HELPER="$PLUGIN_DIR/bin/persist-annotation-identities"
 PENDING_WATCHER="$PLUGIN_DIR/bin/watch-pending-annotations"
 LOCK_DIR="/tmp/goodreads-annotation-sync.lock"
 PUBLISHED_RESULT="/tmp/goodreads-annotation-result.log"
@@ -189,7 +190,7 @@ write_receipt() {
         "native_range_count=$native_range_count" \
         "retry_count=$retry_count" \
         "retry_reason=$failed_stage" \
-        'agent_generation=30' \
+        'agent_generation=31' \
         "trigger=$trigger" \
         "local_verified=$local_verified" \
         "native_notified=$native_notified" \
@@ -271,15 +272,20 @@ esac
 
 state_file="$STATE_DIR/$asin"
 state_temp="$state_file.$$"
-if ! grep -Fqx 'agent_generation=30' "$state_file" 2>/dev/null; then
-    if ! printf '%s\n' 'force_cloud_replay=true' >>"$payload"; then
-        exit 8
+if ! grep -Fqx 'agent_generation=31' "$state_file" 2>/dev/null; then
+    # Generation 31 changes only the active KPP overlay refresh. A verified
+    # generation-30 store does not need another cloud replay merely to load a
+    # new agent class into the long-lived framework JVM.
+    if ! grep -Fqx 'agent_generation=30' "$state_file" 2>/dev/null; then
+        if ! printf '%s\n' 'force_cloud_replay=true' >>"$payload"; then
+            exit 8
+        fi
     fi
     # The generation-18 migration already purged malformed zero-endpoint
     # identities. Do not reconstruct those synthetic records again merely
     # because a newer agent needs to replay valid records into an exact book
     # identity. Fresh/older installs still receive the one-time cleanup.
-    if ! grep -Eq '^agent_generation=(18|19|20|21|22|23|24|25|26|27|28|29|30)$' "$state_file" 2>/dev/null; then
+    if ! grep -Eq '^agent_generation=(18|19|20|21|22|23|24|25|26|27|28|29|30|31)$' "$state_file" 2>/dev/null; then
         if ! printf '%s\n' \
             'repair_zero_endpoint=true' \
             'purge_legacy_cloud=true' >>"$payload"; then
@@ -288,7 +294,7 @@ if ! grep -Fqx 'agent_generation=30' "$state_file" 2>/dev/null; then
     fi
 fi
 if ! awk -F= '
-    BEGIN { print "agent_generation=30" }
+    BEGIN { print "agent_generation=31" }
     /^desired\.[0-9]+\.start=/ {
         key=$1; sub(/\.start$/, "", key); start[key]=$2
     }
@@ -492,6 +498,20 @@ state_temp=""
 if [ "$outbox_sequence" = "legacy" ]; then
     outbox_acknowledged="unavailable"
 else
+    if [ ! -x "$IDENTITY_HELPER" ] \
+        || ! "$IDENTITY_HELPER" "$asin" "$outbox_sequence" \
+            "$outbox_checksum" "$pending_candidate"; then
+        normalized_result="$request_result.identity"
+        grep -v -E '^(success|failed_stage|outbox_sequence|outbox_acknowledged)=' \
+            "$request_result" >"$normalized_result" || exit 8
+        printf '%s\n' "outbox_sequence=$outbox_sequence" \
+            'outbox_acknowledged=false' 'success=false' \
+            'failed_stage=identity_receipt' >>"$normalized_result"
+        mv -f "$normalized_result" "$request_result" || exit 8
+        publish_result || exit 8
+        write_receipt failed "$request_result" identity_receipt || true
+        exit 12
+    fi
     if [ -x "$OUTBOX_ACK_HELPER" ] \
         && "$OUTBOX_ACK_HELPER" "$asin" "$outbox_sequence" "$outbox_checksum" \
             >/dev/null 2>&1; then

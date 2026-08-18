@@ -6,7 +6,8 @@ project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 helper="$project_root/goodreads.koplugin/bin/manage-sync-receipts"
 test_root="$(mktemp -d)"
 ack_root="$(mktemp -d /tmp/goodreads-outbox-test.XXXXXX)"
-trap 'rm -rf "$test_root" "$ack_root"' EXIT HUP INT TERM
+identity_payload="/tmp/goodreads-annotation-pending-12345$$"
+trap 'rm -rf "$test_root" "$ack_root"; rm -f "$identity_payload"' EXIT HUP INT TERM
 
 plugin_dir="$test_root/plugins/goodreads.koplugin"
 settings_dir="$test_root/settings"
@@ -34,7 +35,7 @@ note_count=1
 native_range_count=2
 retry_count=2
 retry_reason=wait_for_active_book
-agent_generation=30
+agent_generation=31
 trigger=close
 local_verified=false
 native_notified=false
@@ -115,9 +116,12 @@ cat >"$test_root/poll-wait-event" <<'EOF'
 #!/bin/sh
 exit 1
 EOF
-cat >"$test_root/poll-get-prop" <<'EOF'
+cat >"$test_root/poll-get-prop" <<EOF
 #!/bin/sh
-printf '%s\n' com.lab126.booklet.reader
+case "\$2" in
+    activeApp) printf '%s\n' com.lab126.booklet.reader ;;
+    activeContext) printf '%s\n' ':1:file:///mnt/us/documents/Test_'$asin'.kfx' ;;
+esac
 EOF
 chmod 0755 "$poll_plugin/bin/sync-annotations" "$test_root/poll-wait-event" \
     "$test_root/poll-get-prop"
@@ -149,6 +153,7 @@ mkdir -p "$dbus_plugin/bin" "$dbus_pending" "$test_root/dbus-tmp" \
 cat >"$dbus_plugin/bin/sync-annotations" <<EOF
 #!/bin/sh
 printf 'sync\n' >>'$test_root/dbus-sync-calls'
+printf 'sync\n' >>'$test_root/dbus-order'
 rm -f "\$1"
 [ "\$(wc -l <'$test_root/dbus-sync-calls' | tr -d '[:space:]')" -ge 3 ]
 EOF
@@ -167,10 +172,32 @@ EOF
 cat >"$test_root/dbus-usleep" <<EOF
 #!/bin/sh
 printf '%s\n' "\$1" >>'$test_root/dbus-sleep-calls'
+printf 'sleep:%s\n' "\$1" >>'$test_root/dbus-order'
 exit 0
 EOF
+cat >"$test_root/dbus-get-prop" <<EOF
+#!/bin/sh
+case "\$2" in
+    activeApp)
+        count=0
+        [ ! -f '$test_root/dbus-active-calls' ] \
+            || count=\$(cat '$test_root/dbus-active-calls')
+        count=\$((count + 1))
+        printf '%s\n' "\$count" >'$test_root/dbus-active-calls'
+        if [ "\$count" -le 2 ]; then
+            printf '%s\n' com.lab126.KPPMainApp
+        else
+            printf '%s\n' com.lab126.booklet.reader
+        fi
+        ;;
+    activeContext)
+        printf '%s\n' ':1:file:///mnt/us/documents/Test_'$asin'.kfx'
+        ;;
+esac
+EOF
 chmod 0755 "$dbus_plugin/bin/sync-annotations" "$test_root/dbus-monitor" \
-    "$test_root/dbus-timeout" "$test_root/dbus-usleep"
+    "$test_root/dbus-timeout" "$test_root/dbus-usleep" \
+    "$test_root/dbus-get-prop"
 cat >"$dbus_pending/$asin" <<EOF
 version=1
 asin=$asin
@@ -184,11 +211,203 @@ GOODREADS_PLUGIN_DIR="$dbus_plugin" GOODREADS_SETTINGS_DIR="$watch_settings" \
     GOODREADS_DBUS_MONITOR="$test_root/dbus-monitor" \
     GOODREADS_TIMEOUT_BIN="$test_root/dbus-timeout" \
     GOODREADS_USLEEP_BIN="$test_root/dbus-usleep" \
+    GOODREADS_LIPC_GET_PROP="$test_root/dbus-get-prop" \
     "$project_root/goodreads.koplugin/bin/watch-pending-annotations"
 test "$(wc -l <"$test_root/dbus-sync-calls" | tr -d '[:space:]')" = 3
 printf '%s\n' 200000 600000 >"$test_root/expected-dbus-sleeps"
 cmp -s "$test_root/expected-dbus-sleeps" "$test_root/dbus-sleep-calls"
+printf '%s\n' sync sleep:200000 sync sleep:600000 sync \
+    >"$test_root/expected-dbus-order"
+cmp -s "$test_root/expected-dbus-order" "$test_root/dbus-order"
 test ! -e "$dbus_pending/$asin"
+
+# The native reader may start in the short gap between two bounded DBus
+# monitor subscriptions. On the next loop, an exact activeContext URI for a
+# pending ASIN must replay immediately instead of waiting for another open.
+gap_plugin="$test_root/gap-plugin"
+gap_private="$test_root/gap-private"
+gap_pending="$gap_private/annotation-pending"
+mkdir -p "$gap_plugin/bin" "$gap_pending" "$test_root/gap-tmp" \
+    "$test_root/gap-lock"
+cat >"$gap_plugin/bin/sync-annotations" <<EOF
+#!/bin/sh
+printf 'sync\n' >>'$test_root/gap-sync-calls'
+rm -f "\$1"
+[ "\$(wc -l <'$test_root/gap-sync-calls' | tr -d '[:space:]')" -ge 2 ]
+EOF
+cat >"$test_root/gap-dbus-monitor" <<EOF
+#!/bin/sh
+printf 'monitor\n' >>'$test_root/gap-monitor-calls'
+printf '%s\n' \
+    'signal sender=org.freedesktop.DBus -> dest=:1.1; interface=org.freedesktop.DBus; member=NameAcquired'
+EOF
+cat >"$test_root/gap-get-prop" <<EOF
+#!/bin/sh
+case "\$2" in
+    activeApp)
+        count=0
+        [ ! -f '$test_root/gap-active-calls' ] \
+            || count=\$(cat '$test_root/gap-active-calls')
+        count=\$((count + 1))
+        printf '%s\n' "\$count" >'$test_root/gap-active-calls'
+        if [ "\$count" -le 2 ]; then
+            printf '%s\n' com.lab126.KPPMainApp
+        else
+            printf '%s\n' com.lab126.booklet.reader
+        fi
+        ;;
+    activeContext)
+        count=\$(cat '$test_root/gap-active-calls')
+        if [ "\$count" -le 2 ]; then
+            printf '%s\n' ':0:app://com.lab126.KPPMainApp?view=KPP_HOME'
+        else
+            printf '%s\n' ':1:file:///mnt/us/documents/Test_'$asin'.kfx'
+        fi
+        ;;
+esac
+EOF
+chmod 0755 "$gap_plugin/bin/sync-annotations" \
+    "$test_root/gap-dbus-monitor" "$test_root/gap-get-prop"
+cat >"$gap_pending/$asin" <<EOF
+version=1
+asin=$asin
+request_id=1
+retry_count=0
+desired_count=0
+EOF
+GOODREADS_PLUGIN_DIR="$gap_plugin" GOODREADS_SETTINGS_DIR="$watch_settings" \
+    GOODREADS_PRIVATE_STATE_DIR="$gap_private" \
+    GOODREADS_LOCK_DIR="$test_root/gap-lock" GOODREADS_TMP_DIR="$test_root/gap-tmp" \
+    GOODREADS_DBUS_MONITOR="$test_root/gap-dbus-monitor" \
+    GOODREADS_TIMEOUT_BIN="$test_root/dbus-timeout" \
+    GOODREADS_USLEEP_BIN="$test_root/dbus-usleep" \
+    GOODREADS_LIPC_GET_PROP="$test_root/gap-get-prop" \
+    "$project_root/goodreads.koplugin/bin/watch-pending-annotations"
+test "$(wc -l <"$test_root/gap-sync-calls" | tr -d '[:space:]')" = 2
+test "$(wc -l <"$test_root/gap-monitor-calls" | tr -d '[:space:]')" = 1
+test ! -e "$gap_pending/$asin"
+
+# A matching URI can remain visible after ReaderSDK releases its transient
+# exact handle. Starting the long-lived DBus listener must not launch another
+# three retries for the same pending sequence and unchanged active context.
+bounded_plugin="$test_root/bounded-plugin"
+bounded_private="$test_root/bounded-private"
+bounded_pending="$bounded_private/annotation-pending"
+mkdir -p "$bounded_plugin/bin" "$bounded_pending" "$test_root/bounded-tmp" \
+    "$test_root/bounded-lock"
+cat >"$bounded_plugin/bin/sync-annotations" <<EOF
+#!/bin/sh
+printf 'sync\n' >>'$test_root/bounded-sync-calls'
+rm -f "\$1"
+exit 1
+EOF
+cat >"$test_root/bounded-dbus-monitor" <<EOF
+#!/bin/sh
+rm -f '$bounded_pending/$asin'
+printf '%s\n' \
+    'signal sender=org.freedesktop.DBus -> dest=:1.1; interface=org.freedesktop.DBus; member=NameAcquired'
+EOF
+cat >"$test_root/bounded-get-prop" <<EOF
+#!/bin/sh
+case "\$2" in
+    activeApp) printf '%s\n' com.lab126.booklet.reader ;;
+    activeContext) printf '%s\n' ':1:file:///mnt/us/documents/Test_'$asin'.kfx' ;;
+esac
+EOF
+chmod 0755 "$bounded_plugin/bin/sync-annotations" \
+    "$test_root/bounded-dbus-monitor" "$test_root/bounded-get-prop"
+cat >"$bounded_pending/$asin" <<EOF
+version=1
+asin=$asin
+request_id=1
+retry_count=0
+desired_count=0
+outbox_sequence=9
+EOF
+GOODREADS_PLUGIN_DIR="$bounded_plugin" GOODREADS_SETTINGS_DIR="$watch_settings" \
+    GOODREADS_PRIVATE_STATE_DIR="$bounded_private" \
+    GOODREADS_LOCK_DIR="$test_root/bounded-lock" \
+    GOODREADS_TMP_DIR="$test_root/bounded-tmp" \
+    GOODREADS_DBUS_MONITOR="$test_root/bounded-dbus-monitor" \
+    GOODREADS_TIMEOUT_BIN="$test_root/dbus-timeout" \
+    GOODREADS_USLEEP_BIN="$test_root/dbus-usleep" \
+    GOODREADS_LIPC_GET_PROP="$test_root/bounded-get-prop" \
+    "$project_root/goodreads.koplugin/bin/watch-pending-annotations"
+test "$(wc -l <"$test_root/bounded-sync-calls" | tr -d '[:space:]')" = 3
+
+# Attaching the native helper can itself emit another reader appStarted signal
+# on this firmware. Those echo signals must not recursively replay the same
+# snapshot. A genuine Home event clears the atomic marker and lets the next
+# reader activation consume the pending snapshot.
+echo_plugin="$test_root/echo-plugin"
+echo_private="$test_root/echo-private"
+echo_pending="$echo_private/annotation-pending"
+mkdir -p "$echo_plugin/bin" "$echo_pending" "$test_root/echo-tmp" \
+    "$test_root/echo-lock"
+cat >"$echo_plugin/bin/sync-annotations" <<EOF
+#!/bin/sh
+printf 'sync\n' >>'$test_root/echo-sync-calls'
+rm -f "\$1"
+[ "\$(wc -l <'$test_root/echo-sync-calls' | tr -d '[:space:]')" -ge 4 ]
+EOF
+cat >"$test_root/echo-dbus-monitor" <<'EOF'
+#!/bin/sh
+printf '%s\n' \
+    'signal sender=:1.14 -> dest=(null destination) serial=1 path=/default; interface=com.lab126.appmgrd; member=appStarted' \
+    '   string "com.lab126.booklet.reader"' \
+    '   string ""' \
+    'signal sender=:1.14 -> dest=(null destination) serial=2 path=/default; interface=com.lab126.appmgrd; member=appStarted' \
+    '   string "com.lab126.booklet.reader"' \
+    '   string ""' \
+    'signal sender=:1.14 -> dest=(null destination) serial=3 path=/default; interface=com.lab126.appmgrd; member=appStarted' \
+    '   string "com.lab126.KPPMainApp"' \
+    '   string ""' \
+    'signal sender=:1.14 -> dest=(null destination) serial=4 path=/default; interface=com.lab126.appmgrd; member=appStarted' \
+    '   string "com.lab126.booklet.reader"' \
+    '   string ""'
+EOF
+cat >"$test_root/echo-get-prop" <<EOF
+#!/bin/sh
+case "\$2" in
+    activeApp)
+        count=0
+        [ ! -f '$test_root/echo-active-calls' ] \
+            || count=\$(cat '$test_root/echo-active-calls')
+        count=\$((count + 1))
+        printf '%s\n' "\$count" >'$test_root/echo-active-calls'
+        if [ "\$count" -le 2 ]; then
+            printf '%s\n' com.lab126.KPPMainApp
+        else
+            printf '%s\n' com.lab126.booklet.reader
+        fi
+        ;;
+    activeContext)
+        printf '%s\n' ':1:file:///mnt/us/documents/Test_'$asin'.kfx'
+        ;;
+esac
+EOF
+chmod 0755 "$echo_plugin/bin/sync-annotations" \
+    "$test_root/echo-dbus-monitor" "$test_root/echo-get-prop"
+cat >"$echo_pending/$asin" <<EOF
+version=1
+asin=$asin
+request_id=1
+retry_count=0
+desired_count=0
+outbox_sequence=10
+EOF
+GOODREADS_PLUGIN_DIR="$echo_plugin" GOODREADS_SETTINGS_DIR="$watch_settings" \
+    GOODREADS_PRIVATE_STATE_DIR="$echo_private" \
+    GOODREADS_LOCK_DIR="$test_root/echo-lock" \
+    GOODREADS_TMP_DIR="$test_root/echo-tmp" \
+    GOODREADS_DBUS_MONITOR="$test_root/echo-dbus-monitor" \
+    GOODREADS_TIMEOUT_BIN="$test_root/dbus-timeout" \
+    GOODREADS_USLEEP_BIN="$test_root/dbus-usleep" \
+    GOODREADS_LIPC_GET_PROP="$test_root/echo-get-prop" \
+    "$project_root/goodreads.koplugin/bin/watch-pending-annotations"
+test "$(wc -l <"$test_root/echo-sync-calls" | tr -d '[:space:]')" = 4
+test ! -e "$echo_pending/$asin"
+test ! -d "$test_root/echo-lock/goodreads-annotation-watcher.lock"
 
 # TERM during a blocked DBus listen must exit the watcher and release its
 # singleton lock; upgrade/restart must never leave an untracked old listener.
@@ -281,6 +500,70 @@ printf '%s\n' 'sequence=4' "checksum=$checksum_b" >"$ack_outbox/$asin"
 wait "$ack_pid"
 grep -Fqx 'outbox_acknowledged=true' "$ack_root/ack-result"
 grep -Fqx 'sequence=4' "$ack_outbox/$asin"
+
+# Successful outbound delivery retains only a text-free XPointer-to-KFX
+# identity receipt. The receipt must pair entries by index, survive endpoint
+# direction changes, reject malformed replacements, and never retain notes.
+identity_helper="$project_root/goodreads.koplugin/bin/persist-annotation-identities"
+identity_root="$test_root/identity-private"
+identity_outbox="$identity_root/annotation-outbox"
+mkdir -p "$identity_outbox"
+cat >"$identity_outbox/$asin.body" <<EOF
+outbox_version=1
+asin=$asin
+sequence=7
+desired_count=2
+desired.0.start_hex=2f6563686f2f7465787428292e3130
+desired.0.end_hex=2f6563686f2f7465787428292e3231
+desired.0.note_hex=70726976617465206e6f7465
+desired.1.start_hex=2f6f746865722e39
+desired.1.end_hex=2f6f746865722e35
+desired.1.note_hex=
+EOF
+identity_outbox_checksum="$(sha256sum "$identity_outbox/$asin.body" | awk '{print $1}')"
+cp "$identity_outbox/$asin.body" "$identity_outbox/$asin"
+printf 'checksum=%s\n' "$identity_outbox_checksum" >>"$identity_outbox/$asin"
+cat >"$identity_payload" <<EOF
+version=1
+asin=$asin
+desired_count=2
+desired.0.start=AAAAAAAAAAA1
+desired.0.start_short=100
+desired.0.end=AAAAAAAAAAA2
+desired.0.end_short=200
+desired.0.note_hex=70726976617465206e6f7465
+desired.1.start=AAAAAAAAAAA4
+desired.1.start_short=400
+desired.1.end=AAAAAAAAAAA3
+desired.1.end_short=300
+desired.1.note_hex=
+EOF
+GOODREADS_PRIVATE_STATE_DIR="$identity_root" \
+    GOODREADS_SHA256_TOOL="$(command -v sha256sum)" \
+    "$identity_helper" "$asin" 7 "$identity_outbox_checksum" "$identity_payload"
+identity_file="$identity_root/annotation-identities/$asin"
+grep -Fqx 'identity_version=1' "$identity_file"
+grep -Fqx 'count=2' "$identity_file"
+grep -Fqx 'item.0.native_start_short=100' "$identity_file"
+grep -Fqx 'item.1.native_end_short=300' "$identity_file"
+if grep -Eq 'note|70726976617465206e6f7465' "$identity_file"; then
+    printf 'error: annotation identity receipt retained private note content\n' >&2
+    exit 1
+fi
+identity_verify="$test_root/identity-body"
+sed '$d' "$identity_file" >"$identity_verify"
+identity_digest="$(sed -n 's/^checksum=//p' "$identity_file")"
+test "$(sha256sum "$identity_verify" | awk '{print $1}')" = "$identity_digest"
+identity_before="$(sha256sum "$identity_file" | awk '{print $1}')"
+sed -i.bak 's/^desired_count=2$/desired_count=3/' "$identity_payload"
+if GOODREADS_PRIVATE_STATE_DIR="$identity_root" \
+    GOODREADS_SHA256_TOOL="$(command -v sha256sum)" \
+    "$identity_helper" "$asin" 7 "$identity_outbox_checksum" "$identity_payload" \
+        >/dev/null 2>&1; then
+    printf 'error: malformed identity payload replaced a valid receipt\n' >&2
+    exit 1
+fi
+test "$(sha256sum "$identity_file" | awk '{print $1}')" = "$identity_before"
 
 support_path="$(
     GOODREADS_PLUGIN_DIR="$plugin_dir" GOODREADS_SETTINGS_DIR="$settings_dir" \

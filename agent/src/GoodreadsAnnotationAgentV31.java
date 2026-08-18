@@ -21,8 +21,8 @@ import java.util.Properties;
 import java.util.Set;
 
 /** Reconciles KOReader highlights with the native Kindle annotation store. */
-public final class GoodreadsAnnotationAgentV30 {
-    private GoodreadsAnnotationAgentV30() {}
+public final class GoodreadsAnnotationAgentV31 {
+    private GoodreadsAnnotationAgentV31() {}
 
     public static void agentmain(String payloadPath, Instrumentation instrumentation) {
         PrintWriter out;
@@ -266,6 +266,17 @@ public final class GoodreadsAnnotationAgentV30 {
             Map<String, Object> verified = indexAnnotations(verifiedAnnotations);
             verifyDesired(verified, desired);
             verifyDeleted(verified, desiredKeys, previous);
+
+            // Per-record KPP responses make the durable store and native sync
+            // pipeline aware of each edit, but this firmware keeps the
+            // already-rendered page's annotation overlay cached. Ask KPP to
+            // re-enumerate the active book once after a real local mutation so
+            // creates, note changes, and especially deletions appear without a
+            // Library round trip. Do not refresh on an idempotent reconciliation.
+            if (notifyKpp && counters.hasNativeMutations()) {
+                stage = "refresh_native_reader_annotations";
+                refreshNativeReaderAnnotations(readerSdk, book, counters);
+            }
 
             if (whisperStoreEnabled) {
                 stage = "sync_cloud_snapshot";
@@ -680,6 +691,22 @@ public final class GoodreadsAnnotationAgentV30 {
         Object record = invokeStaticCompatible(recordType, "a", bookData, annotation);
         invokeCompatible(proxy, "a", record, operation);
         counters.nativeNotifications++;
+    }
+
+    private static void refreshNativeReaderAnnotations(
+        Object readerSdk,
+        Object book,
+        Counters counters
+    ) throws Exception {
+        Object proxy = invokeCompatible(readerSdk, "xB");
+        if (proxy == null) {
+            throw new IllegalStateException("native annotation proxy unavailable");
+        }
+        // AnnotationManagerProxy.ab(Book) validates that this is still KPP's
+        // active book and emits the firmware's payload-free annotationsChanged
+        // event. The event makes KPP fetch the verified store again.
+        invokeCompatible(proxy, "ab", book);
+        counters.nativeRefreshes++;
     }
 
     private static void syncKsdkEdit(
@@ -1518,6 +1545,7 @@ public final class GoodreadsAnnotationAgentV30 {
         private int notesUpdated;
         private int notesDeleted;
         private int nativeNotifications;
+        private int nativeRefreshes;
         private int zeroEndpointRepairs;
         private int terminalEndpointRepairs;
         private int cloudEdits;
@@ -1527,6 +1555,16 @@ public final class GoodreadsAnnotationAgentV30 {
         private int nativeJournalEdits;
         private int nativeUploadRequests;
 
+        private boolean hasNativeMutations() {
+            return highlightsCreated > 0
+                || highlightsDeleted > 0
+                || notesCreated > 0
+                || notesUpdated > 0
+                || notesDeleted > 0
+                || zeroEndpointRepairs > 0
+                || terminalEndpointRepairs > 0;
+        }
+
         private void write(PrintWriter out) {
             out.println("highlights_created=" + highlightsCreated);
             out.println("highlights_deleted=" + highlightsDeleted);
@@ -1534,6 +1572,7 @@ public final class GoodreadsAnnotationAgentV30 {
             out.println("notes_updated=" + notesUpdated);
             out.println("notes_deleted=" + notesDeleted);
             out.println("native_notifications=" + nativeNotifications);
+            out.println("native_refreshes=" + nativeRefreshes);
             out.println("zero_endpoint_repairs=" + zeroEndpointRepairs);
             out.println("terminal_endpoint_repairs=" + terminalEndpointRepairs);
             out.println("cloud_edits=" + cloudEdits);

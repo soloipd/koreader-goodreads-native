@@ -27,6 +27,9 @@ account token is required or stored.
   suspend, book close, and the Bookshelf do not wait for the ARM extractor.
 - Optionally imports native Kindle highlights and notes into the matching
   converted KOReader book using provenance-aware, conflict-safe reconciliation.
+- Recognizes an exported KOReader annotation by its exact canonical KFX range,
+  even when reverse translation spells an EPUB endpoint one character
+  differently, so a native echo cannot create a duplicate.
 - Offers configurable 2, 5, 10, or 15 minute periodic checkpoints.
 - Offers a one-time 1–5 star chooser when a book is completed.
 - Supports manual rating updates and clearing an existing rating.
@@ -331,6 +334,15 @@ local Kindle book to open, and a low-power listener retries automatically. A
 cloud placeholder sharing the same ASIN is never used as a substitute for the
 local book.
 
+The listener keeps one filtered DBus subscription rather than repeatedly
+starting monitor processes. One exact native-book activation permits one group
+of at most three attempts: immediately, then after approximately 200 ms and
+600 ms. The reader-start event produced by the helper's own Java attachment is
+ignored, so it cannot recursively start more retry groups. A newer queued
+snapshot, or a real transition away from and back to the exact local book,
+re-arms the group. The listener owns and reaps its DBus child and exits when the
+pending queue is empty.
+
 After KOReader exit, framework restart, sleep, or reboot, the source outbox is
 reloaded and the newest snapshot resumes. Native success deletes the source
 snapshot only through an atomic sequence/checksum comparison, so an older
@@ -368,12 +380,17 @@ two-way deletion resumes. Changing an imported highlight's style detaches
 highlight ownership. Native deletion may remove an unchanged imported note from
 a pre-existing KOReader highlight, but never the highlight itself. Ambiguous
 v0.7 markers are preserved and detached rather than guessed. Exact and reversed
-duplicate ranges collapse.
+duplicate ranges collapse. A durable root-only identity receipt maps each
+current KOReader range to the exact KFX endpoints accepted by Kindle. Import
+uses that native identity instead of requiring a byte-for-byte XPointer match;
+only an unchanged native-owned echo is removed, while local notes, edits, and
+ownership are preserved.
 
-Deleting a native-imported highlight in KOReader records a bounded, text-free
-native-range tombstone. This prevents an older native snapshot from recreating
-the highlight while KOReader's outbound deletion is still queued. The tombstone
-is removed only when a later complete native snapshot no longer contains that
+Deleting either a native-imported highlight or a previously exported local
+highlight in KOReader records a bounded, text-free native-range tombstone. This
+prevents an older or direction-reversed native snapshot from recreating the
+highlight while KOReader's outbound deletion is still queued. The tombstone is
+removed only when a later complete native snapshot no longer contains that
 range. Tombstones contain coordinates and timestamps, never annotation text.
 
 The root-only snapshot is removed only after KOReader's annotation persistence
@@ -422,6 +439,11 @@ not pretend that a new upload occurred. Contradictory or incomplete delivery
 proof fails closed and remains retryable. Diagnostics report every stage
 separately and never treat a disabled service as successful delivery.
 
+After a verified mutation of the exact active book, the agent emits one
+payload-free native annotation-change notification. This refreshes the
+already-open Kindle page after a create, note edit, note removal, or deletion;
+an unchanged reconciliation emits no full overlay refresh.
+
 ### Upgrade repairs
 
 The upgrade migration removes malformed annotations created by older
@@ -436,6 +458,9 @@ Highlight and note text is limited to KOReader's metadata, root-only source and
 pending files under `/var/local`, transient requests, Kindle's native annotation
 store, and Amazon's normal annotation pipeline. Temporary and successfully
 delivered requests are removed.
+The root-only annotation identity receipt contains normalized EPUB XPointers,
+exact KFX coordinates, a sequence, and a checksum—but no title, selected text,
+note text, account data, or credential.
 Diagnostics and support summaries contain counts and state only, never
 annotation text. Text-free receipts and anonymized support summaries remain on
 USB-visible `/mnt/us`; annotation payloads do not.

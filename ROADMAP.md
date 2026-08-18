@@ -75,6 +75,9 @@ Status labels describe `main`, not unreleased experiments:
 - v0.7 imports native ranges through the position-map-enabled companion plugin.
 - v0.8 adds component provenance, native note edits/removal, safe highlight
   deletion, local-edit protection, and coordinate-only deletion tombstones.
+- v0.11.2 adds canonical outbound KFX identity receipts, endpoint-spelling echo
+  suppression, safe native-owned duplicate collapse, and tombstones for deleted
+  KOReader-owned exports.
 - Destructive merge requires the v2 exporter's explicit complete-snapshot
   attestation; incomplete payloads are additive-only.
 - Plugin-origin persistence events are guarded so native imports cannot echo

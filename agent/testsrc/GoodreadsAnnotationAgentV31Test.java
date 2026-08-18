@@ -16,7 +16,7 @@ import java.util.Map;
 import java.util.Properties;
 import testsupport.Fakes;
 
-public final class GoodreadsAnnotationAgentV30Test {
+public final class GoodreadsAnnotationAgentV31Test {
     private static final String ASIN = "B0FLB24198";
     private static final String START = "AAAAAAAAAAAA";
     private static final String END = "AAAAAAAAAAAB";
@@ -29,7 +29,7 @@ public final class GoodreadsAnnotationAgentV30Test {
     private static final String TERMINAL_END_NORMALIZED = "ATwFAAD3AgAA";
     private static int requestSequence = 10000000;
 
-    private GoodreadsAnnotationAgentV30Test() {}
+    private GoodreadsAnnotationAgentV31Test() {}
 
     public static void main(String[] ignored) throws Exception {
         verifyExactRangeIdentityParsing();
@@ -44,6 +44,10 @@ public final class GoodreadsAnnotationAgentV30Test {
         expect("true", created.get("local_verified"), "create should be verified after reopen");
         expect("true", created.get("native_notified"), "native reader should be notified");
         expect("2", created.get("native_notifications"), "highlight and note should reach KPP/KSDK");
+        expect("1", created.get("native_refreshes"),
+            "a native mutation should refresh the active KPP overlay once");
+        expect(1, sdk.proxy.refreshes,
+            "create reconciliation should emit one full annotationsChanged event");
         expect("0", created.get("ksdk_writes"), "legacy firmware must not use KSDK writes");
         expect("unavailable", created.get("ksdk_synced"), "disabled KSDK should be explicit");
         expect("1", created.get("highlights_created"), "highlight should be created");
@@ -121,6 +125,10 @@ public final class GoodreadsAnnotationAgentV30Test {
             "unchanged reconciliation must not request a native upload");
         expect("2", unchanged.get("native_notifications"),
             "persisted highlight and note should be re-announced to KPP");
+        expect("0", unchanged.get("native_refreshes"),
+            "an idempotent reconciliation must not refresh the active page");
+        expect(1, sdk.proxy.refreshes,
+            "unchanged reconciliation must not emit another full refresh");
         expect("0", unchanged.get("highlights_created"),
             "KPP refresh must not duplicate the persisted highlight");
         expect("0", unchanged.get("notes_created"),
@@ -162,6 +170,8 @@ public final class GoodreadsAnnotationAgentV30Test {
         Map<String, String> updated = run(sdk, desired("edited note"), previous(START, END, true));
         expect("true", updated.get("success"), "note update should succeed");
         expect("1", updated.get("notes_updated"), "note should be updated");
+        expect("1", updated.get("native_refreshes"),
+            "note update should refresh the active overlay once");
         expect("edited note", findNote(sdk).getText(), "native note text should change");
         expect(AnnotationWriteOperationType.UPDATE,
             sdk.proxy.operations.get(sdk.proxy.operations.size() - 1),
@@ -170,6 +180,8 @@ public final class GoodreadsAnnotationAgentV30Test {
         Map<String, String> noteRemoved = run(sdk, desired(""), previous(START, END, true));
         expect("true", noteRemoved.get("success"), "note removal should succeed");
         expect("1", noteRemoved.get("notes_deleted"), "owned note should be deleted");
+        expect("1", noteRemoved.get("native_refreshes"),
+            "note removal should refresh the active overlay once");
         expect(1, sdk.content.manager.annotations.size(), "highlight should remain after note removal");
         expect(AnnotationWriteOperationType.DELETE,
             sdk.proxy.operations.get(sdk.proxy.operations.size() - 1),
@@ -178,6 +190,8 @@ public final class GoodreadsAnnotationAgentV30Test {
         Map<String, String> deleted = run(sdk, noDesired(), previous(START, END, false));
         expect("true", deleted.get("success"), "highlight deletion should succeed");
         expect("1", deleted.get("highlights_deleted"), "owned highlight should be deleted");
+        expect("1", deleted.get("native_refreshes"),
+            "highlight deletion should refresh the active overlay once");
         expect(0, sdk.content.manager.annotations.size(), "owned range should be removed");
 
         Highlight nativeOnly = new Highlight(
@@ -187,6 +201,8 @@ public final class GoodreadsAnnotationAgentV30Test {
         sdk.content.manager.annotations.add(nativeOnly);
         Map<String, String> preserved = run(sdk, noDesired(), previous());
         expect("true", preserved.get("success"), "empty reconciliation should succeed");
+        expect("0", preserved.get("native_refreshes"),
+            "a no-op reconciliation must not refresh the active overlay");
         expect(1, sdk.content.manager.annotations.size(), "native-only highlight must be preserved");
         expect(nativeOnly, sdk.content.manager.annotations.get(0), "native-only object must be unchanged");
 
@@ -259,7 +275,7 @@ public final class GoodreadsAnnotationAgentV30Test {
         addDesired(payload, 0, START, 100, END, 200, "");
         addDesired(payload, 1, START, 100, END, 200, "retained note");
         addDesired(payload, 2, START, 101, END, 201, "nearby note");
-        Method reader = GoodreadsAnnotationAgentV30.class.getDeclaredMethod(
+        Method reader = GoodreadsAnnotationAgentV31.class.getDeclaredMethod(
             "readRecords", Properties.class, String.class);
         reader.setAccessible(true);
         List<?> records = (List<?>) reader.invoke(null, payload, "desired");
@@ -339,7 +355,7 @@ public final class GoodreadsAnnotationAgentV30Test {
         Path result = Paths.get("/tmp/goodreads-annotation-result-" + requestId + ".log");
         Files.write(path, payload, StandardCharsets.ISO_8859_1);
         Files.deleteIfExists(result);
-        GoodreadsAnnotationAgentV30.agentmain(path.toString(), null);
+        GoodreadsAnnotationAgentV31.agentmain(path.toString(), null);
         expect(false, Files.exists(path), "agent must remove payload after loading it");
         Map<String, String> fields = readResult(result);
         Files.deleteIfExists(result);

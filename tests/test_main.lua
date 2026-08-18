@@ -86,6 +86,19 @@ package.preload["apps/reader/readerui"] = function()
     return ReaderUI
 end
 
+package.preload["apps/reader/modules/readerbookmark"] = function()
+    return {
+        setBookmarkNote = function(
+            bookmark, item_or_index, _, new_note, caller_callback
+        )
+            local annotation = bookmark.ui.annotation.annotations[item_or_index]
+            annotation.note = new_note
+            caller_callback("saved")
+            return "note-dialog"
+        end,
+    }
+end
+
 local saved_settings
 G_reader_settings = {
     readSetting = function()
@@ -181,7 +194,9 @@ local reader = {
 
 local plugin = newPlugin(settings())
 plugin.ui = reader
-reader.goodreads_native = plugin
+assert(plugin:attachToUi(), "active plugin should attach to ReaderUI")
+assert(reader.goodreads_native == plugin,
+    "ReaderUI hooks should resolve the active document plugin")
 
 local commands = {}
 local original_execute = os.execute
@@ -583,10 +598,11 @@ assert(#scheduled == scheduled_before_interval_change + 1, "interval change must
 -- it resolves the active reader plugin, which has different settings/state.
 local installer = newPlugin(settings({ percentage_enabled = false }))
 installer:applyReaderHook()
+installer:applyAnnotationNoteHook()
 
 local active = newPlugin(settings())
 active.ui = reader
-reader.goodreads_native = active
+assert(active:attachToUi(), "active hook plugin should attach to ReaderUI")
 reader.document = {
     virtual_path = "KINDLE_VIRTUAL://B0FLB24198/book.epub",
 }
@@ -597,6 +613,43 @@ assert(ReaderUI.onClose(reader) == "closed", "wrapped close should preserve the 
 assert(active.last_checkpoint.percent == 47, "close hook should capture live reader progress")
 assert(commands[#commands]:match("sync%-progress B0FLB24198 47"), "active reader settings must control close sync")
 assert(installer.last_checkpoint == nil, "file-manager plugin instance must not process reader close")
+
+reader.document = {
+    virtual_path = "KINDLE_VIRTUAL://B0FLB24198/book.epub",
+}
+reader.annotation.annotations = {
+    { drawer = "underscore", note = "old private note" },
+}
+do
+    local scheduled_before_note_edit = #scheduled
+    local note_callback_value
+    local note_event_count = 0
+    reader.goodreads_native = nil
+    reader.handleEvent = function(_, event)
+        assert(event.name == "GoodreadsAnnotationNoteSaved",
+            "existing-note saves should dispatch through ReaderUI")
+        note_event_count = note_event_count + 1
+        return active:onGoodreadsAnnotationNoteSaved()
+    end
+    local ReaderBookmark = require("apps/reader/modules/readerbookmark")
+    assert(ReaderBookmark.setBookmarkNote({ ui = reader }, 1, false,
+        "edited private note", function(value)
+        note_callback_value = value
+    end) == "note-dialog", "wrapped note editor should preserve the original return value")
+    assert(note_callback_value == "saved", "wrapped note editor should preserve its caller callback")
+    assert(note_event_count == 1,
+        "existing-note saves should reach the active plugin without a reverse UI lookup")
+    assert(#scheduled == scheduled_before_note_edit + 1,
+        "editing an existing note should schedule annotation reconciliation")
+    assert(active.last_annotation_event.changed == 1,
+        "a successful existing-note save should be observed")
+    assert(active.last_annotation_event.stats.notes == 1,
+        "a successful existing-note save should count notes without retaining text")
+    assert(active.last_annotation_event.text == nil,
+        "edited note text must never enter diagnostics state")
+    reader.handleEvent = nil
+    assert(active:attachToUi(), "active plugin should restore its ReaderUI lookup")
+end
 
 reader.document = {
     virtual_path = "KINDLE_VIRTUAL://B0FLB24198/book.epub",
@@ -800,6 +853,147 @@ assert(exact_identity_annotations[1].goodreads_native_provenance.key
 assert(exact_identity_annotations[1].goodreads_native_provenance.version == 2
     and exact_identity_annotations[2].goodreads_native_provenance.version == 2,
     "new native provenance must use exact identity version 2")
+
+-- An outbound identity receipt is authoritative across the lossy
+-- inclusive/exclusive endpoint round trip. The native reverse translator may
+-- spell the same terminal endpoint one character earlier, but it must match
+-- the existing KOReader highlight instead of creating an echo duplicate.
+do
+local echo_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
+local echo_local = {
+    drawer = "lighten",
+    pos0 = "/echo/text().10",
+    pos1 = "/echo/text().21",
+}
+local echo_reader, echo_annotations = newImportReader({ echo_local })
+local echo_path = "/tmp/goodreads-native-identity-echo-test"
+local echo_file = assert(io.open(echo_path, "w"))
+echo_file:write("private identity echo fixture")
+echo_file:close()
+local echo_native_key = "AAAAAAAAAAA1@100:AAAAAAAAAAA2@200"
+local echo_local_key = "/echo/text().10\0/echo/text().21"
+assert(echo_plugin:applyNativeAnnotationImport(echo_reader, {
+    path = echo_path,
+    asin = "B0FLB24198",
+    snapshot_complete = true,
+    items = {
+        { start_long = "AAAAAAAAAAA1", start_short = 100,
+            end_long = "AAAAAAAAAAA2", end_short = 200, note = "" },
+    },
+}, {
+    { start = { xpointer = "/echo/text().10" },
+        ["end"] = { xpointer = "/echo/text().20" } },
+}, {
+    by_native = { [echo_native_key] = { echo_local_key } },
+    local_to_native = { [echo_local_key] = echo_native_key },
+}))
+assert(#echo_annotations == 1 and echo_annotations[1] == echo_local,
+    "same KFX identity with an endpoint spelling difference must not duplicate")
+assert(echo_local.goodreads_native_provenance == nil,
+    "matching an outbound echo must not transfer ownership of a local highlight")
+
+-- Deleting a KOReader-owned highlight must retain its native identity as a
+-- tombstone even after the next outbound receipt no longer contains it. A
+-- delayed native snapshot therefore cannot resurrect the deleted range.
+local local_delete_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
+local local_delete_item = {
+    drawer = "lighten",
+    pos0 = "/echo/text().10",
+    pos1 = "/echo/text().21",
+}
+local local_delete_reader, local_delete_annotations = newImportReader({
+    local_delete_item,
+})
+local_delete_plugin.ui = local_delete_reader
+table.remove(local_delete_annotations, 1)
+assert(local_delete_plugin:rememberNativeAnnotationDeletion({
+    local_delete_item, index_modified = -1,
+}, {
+    by_native = { [echo_native_key] = { echo_local_key } },
+    local_to_native = { [echo_local_key] = echo_native_key },
+}), "a KOReader-owned exported range must produce a deletion tombstone")
+assert(local_delete_plugin.settings.native_annotation_tombstones
+    .B0FLB24198[echo_native_key],
+    "the local deletion tombstone must retain only the canonical native range")
+local local_delete_path = "/tmp/goodreads-native-local-delete-echo-test"
+local local_delete_file = assert(io.open(local_delete_path, "w"))
+local_delete_file:write("private local delete echo fixture")
+local_delete_file:close()
+assert(local_delete_plugin:applyNativeAnnotationImport(local_delete_reader, {
+    path = local_delete_path,
+    asin = "B0FLB24198",
+    snapshot_complete = true,
+    items = {
+        { start_long = "AAAAAAAAAAA2", start_short = 200,
+            end_long = "AAAAAAAAAAA1", end_short = 100, note = "" },
+    },
+}, {
+    { start = { xpointer = "/echo/text().10" },
+        ["end"] = { xpointer = "/echo/text().20" } },
+}, { by_native = {}, local_to_native = {} }))
+assert(#local_delete_annotations == 0,
+    "a delayed direction-reversed native echo must not resurrect a local deletion")
+
+local duplicate_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
+local imported_echo = {
+    drawer = "lighten",
+    pos0 = "/echo/text().10",
+    pos1 = "/echo/text().20",
+    goodreads_native_import = true,
+    goodreads_native_provenance = {
+        version = 2,
+        key = echo_native_key,
+        highlight_created = true,
+        note_imported = false,
+        note_value = "",
+        drawer = "lighten",
+    },
+}
+local duplicate_reader, duplicate_annotations = newImportReader({
+    imported_echo, echo_local,
+})
+assert(duplicate_plugin:applyNativeAnnotationImport(duplicate_reader, {
+    path = echo_path,
+    asin = "B0FLB24198",
+    snapshot_complete = true,
+    items = {
+        { start_long = "AAAAAAAAAAA1", start_short = 100,
+            end_long = "AAAAAAAAAAA2", end_short = 200, note = "" },
+    },
+}, {
+    { start = { xpointer = "/echo/text().10" },
+        ["end"] = { xpointer = "/echo/text().20" } },
+}, {
+    by_native = { [echo_native_key] = { echo_local_key } },
+    local_to_native = { [echo_local_key] = echo_native_key },
+}))
+assert(#duplicate_annotations == 1 and duplicate_annotations[1] == echo_local,
+    "an unchanged native-owned echo must collapse into its local source")
+
+local stale_echo_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
+local stale_echo_reader, stale_echo_annotations = newImportReader()
+local stale_echo_path = "/tmp/goodreads-native-stale-identity-test"
+local stale_echo_file = assert(io.open(stale_echo_path, "w"))
+stale_echo_file:write("private stale identity fixture")
+stale_echo_file:close()
+assert(stale_echo_plugin:applyNativeAnnotationImport(stale_echo_reader, {
+    path = stale_echo_path,
+    asin = "B0FLB24198",
+    snapshot_complete = true,
+    items = {
+        { start_long = "AAAAAAAAAAA1", start_short = 100,
+            end_long = "AAAAAAAAAAA2", end_short = 200, note = "" },
+    },
+}, {
+    { start = { xpointer = "/echo/text().10" },
+        ["end"] = { xpointer = "/echo/text().20" } },
+}, {
+    by_native = { [echo_native_key] = { echo_local_key } },
+    local_to_native = { [echo_local_key] = echo_native_key },
+}))
+assert(#stale_echo_annotations == 0,
+    "a deleted local range must not be resurrected by its stale native echo")
+end
 
 local owned_plugin = newPlugin(settings({ native_annotation_import_enabled = true }))
 local owned_reader, owned = newImportReader()
@@ -1366,7 +1560,7 @@ io.open = function(path, mode)
             "native_range_count=1",
             "retry_count=3",
             "retry_reason=private text must not be displayed",
-            "agent_generation=30",
+            "agent_generation=31",
             "local_verified=true",
             "journal_lane=legacy",
             "upload_requested=true",

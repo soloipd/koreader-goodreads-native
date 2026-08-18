@@ -147,6 +147,13 @@ valid existing snapshot jointly prevent rollback after an interrupted write.
 On startup, one plugin instance verifies and resumes every surviving source
 snapshot.
 
+Before a successful outbound request acknowledges that source snapshot, a
+root-only helper atomically persists its exact XPointer-to-KFX range identities
+with the same source sequence. The mode-0600 receipt is SHA-256 protected and
+contains no annotation or note text. It lets reverse import recognize the
+outbound source even when an inclusive/exclusive EPUB endpoint is reconstructed
+one character differently.
+
 The annotation
 agent requires ReaderSDK's active book to match both the ASIN
 and explicit native KFX path, reconciles highlight and note objects through
@@ -174,11 +181,22 @@ wakes. Unsupported paths are reported as `unavailable`, not successful. Only
 one native annotation request runs at a time. Rapid edits for the same ASIN coalesce to the newest immutable snapshot,
 while snapshots for other books remain queued. If the exact native book is not
 active, the request is not mutated or accepted: its latest snapshot moves to a
-root-only pending queue. One lock-protected watcher blocks on the filtered
-system DBus `appStarted` signal and replays pending books when native KPP
-becomes active; a bounded LIPC/active-app path remains the firmware fallback.
-Transient native-write failures retry up to three times; a newer same-book
-snapshot cancels an older retry. Native-to-KOReader reverse-position helper
+root-only pending queue. One lock-protected watcher blocks on one tracked,
+long-lived, filtered system DBus `appStarted` subscription and replays pending
+books when native KPP becomes active. Before subscribing, it compares
+appmgrd's active local KFX URI with pending ASINs so an already-started reader
+is recovered without polling or probing an unrelated book; a bounded
+LIPC/active-app path remains the firmware fallback. Atomic,
+text-free markers under the root-only watcher lock permit only one attempt
+group for a pending sequence in the current native-book activation. The helper
+attach can itself emit `appStarted`, so that echo is ignored until a real
+transition away from the reader or a newer sequence re-arms the marker. The
+watcher owns the DBus child directly and tears it down with the lock, avoiding
+orphaned timeout processes during upgrade or shutdown. Each exact native-book
+activation permits one group of at most three closely spaced attempts; helper
+self-signals cannot create another group. A newer same-book snapshot supersedes
+the old sequence and re-arms delivery, while a genuine transition away from and
+back to the exact book re-arms the retained sequence. Native-to-KOReader reverse-position helper
 exits independently retry the complete import-first flow twice with short
 backoff. Those retries are cancelled when the open reader changes books, while
 invalid snapshots and rejected coordinates fail immediately. After full native
@@ -221,10 +239,20 @@ require that attestation; `success=true` alone is insufficient.
 When the matching converted book next opens or resumes, KOReader runs
 `kindle-helper translate-native-positions` as a detached batch job. Verified
 XPointers merge through `ReaderAnnotation:addItem` and one
-`AnnotationsModified` event. Component-level provenance distinguishes a
+`AnnotationsModified` event. Because KOReader does not emit that event when an
+existing note's text changes without changing annotation type, the plugin also
+wraps the successful note-editor callback and schedules the same coalesced
+full-state snapshot after the in-memory save. Component-level provenance distinguishes a
 native-created highlight from an imported note attached to a pre-existing
 KOReader highlight. Complete snapshots can therefore reconcile native note
 edits, note removal, and safe highlight deletion.
+
+Before creating anything, import canonicalizes each exact KFX EID/offset pair
+without endpoint direction and consults the durable outbound identity receipt.
+One local-owned source wins over an unchanged native-owned echo for that same
+identity. Only the unchanged echo is removed; ambiguous local edits fail closed
+instead of being guessed. A native range whose recorded local source was
+deleted is suppressed rather than recreated.
 
 A native-created highlight is deleted only if its note and style still match
 the imported baseline. A local note edit wins over stale snapshots and protects
@@ -243,11 +271,13 @@ persistence events are origin-guarded, then one converged full-state snapshot
 is captured so genuine KOReader-only annotations still travel outward. Invalid,
 mismatched, or failed imports remain pending and block stale outbound deletion.
 
-An official KOReader removal event for a provenance-bearing highlight records
-a bounded coordinate-only tombstone in plugin settings. A stale complete native
-snapshot containing that key is suppressed rather than re-imported. A later
-complete snapshot that omits the key acknowledges and removes the tombstone.
-No selected text or note content enters this deletion ledger.
+An official KOReader removal event for either a provenance-bearing highlight or
+a local highlight present in the outbound identity receipt records a bounded,
+canonical coordinate-only tombstone in plugin settings. A stale or
+direction-reversed complete native snapshot containing that key is suppressed
+rather than re-imported. A later complete snapshot that omits the key
+acknowledges and removes the tombstone. No selected text or note content enters
+this deletion ledger.
 
 ## SSH-safe doctor
 

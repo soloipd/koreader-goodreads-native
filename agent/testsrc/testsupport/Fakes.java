@@ -213,6 +213,7 @@ public final class Fakes {
             new ArrayList<AnnotationWriteOperationType>();
         public final List<AnnotationWriteOperationType> ksdkOperations =
             new ArrayList<AnnotationWriteOperationType>();
+        public int refreshes;
 
         public void a(Object record, AnnotationWriteOperationType operation) {
             if (record == null) {
@@ -230,6 +231,13 @@ public final class Fakes {
                 throw new AssertionError("KSDK write requires annotation and book");
             }
             ksdkOperations.add(operation);
+        }
+
+        public void ab(Book book) {
+            if (book == null) {
+                throw new AssertionError("native refresh requires an active book");
+            }
+            refreshes++;
         }
     }
 }

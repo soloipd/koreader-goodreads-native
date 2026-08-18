@@ -3,6 +3,62 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.11.2] - 2026-08-18
+
+### Fixed
+
+- Native annotation import now matches previously exported KOReader ranges by
+  their canonical exact KFX EID/offset identity. Inclusive/exclusive endpoint
+  spelling differences no longer create an echo duplicate when returning from
+  the native reader.
+- An unchanged native-owned duplicate safely collapses into its local source;
+  local notes, edits, styles, and ownership remain authoritative.
+- Deleting a previously exported local highlight now records the same bounded,
+  coordinate-only tombstone used for native-owned deletions. Delayed and
+  direction-reversed native snapshots cannot resurrect it after the current
+  identity receipt advances.
+- Successful outbound reconciliation persists a mode-0600, SHA-256-protected
+  XPointer-to-KFX identity receipt before acknowledging the source outbox. The
+  receipt contains no title, highlight text, or note text.
+- Existing-note edits now schedule a coalesced annotation snapshot from
+  KOReader's successful note-save callback. KOReader does not emit
+  `AnnotationsModified` when a note remains a note, so relying on that event
+  alone delayed these edits until suspend, close, or manual synchronization.
+- Existing-note Save callbacks now travel through ReaderUI to the active
+  document plugin. This works even on KOReader builds that do not expose a
+  reverse plugin lookup on the reader object.
+- The native-open watcher now checks `activeContext` before establishing one
+  tracked, long-lived DBus subscription. It retries only when the active local
+  KFX URI contains a pending ASIN, avoiding missed opens, periodic process
+  churn, and background retries against an unrelated native book.
+- Reader-scoped plugin instances now register themselves on `ReaderUI`, so
+  global close and existing-note-save hooks always use the active book's
+  settings and state instead of a file-manager fallback instance.
+- A verified native-store mutation now emits one firmware `annotationsChanged`
+  event for the exact active book. The already-loaded Kindle page refreshes its
+  annotation overlay after creates, note edits, note removal, and highlight
+  deletion without requiring a Library round trip; unchanged syncs do not
+  trigger the full refresh.
+- Annotation agent generation 31 loads the refresh fix into Kindle's long-lived
+  framework JVM without restarting framework or replaying a generation-30
+  store to the cloud.
+- Native-start replay now tries the transient ReaderSDK handle immediately,
+  then twice with short backoff. A pending sequence and unchanged active URI
+  receive only one bounded attempt group instead of another three attaches on
+  repeated reader signals. Atomic text-free activation markers also suppress
+  the reader-start signal emitted by the helper attach itself; a new snapshot
+  or a genuine transition away from and back to the reader re-arms the group.
+- The watcher owns and terminates its single DBus child directly. Upgrade or
+  shutdown no longer waits on an orphaned `timeout` pipeline before releasing
+  the singleton lock.
+
+### Tests
+
+- Added endpoint off-by-one echo, safe duplicate-collapse, stale local-deletion,
+  reversed-endpoint tombstone, malformed identity, checksum, and privacy
+  regressions to the complete release gate, plus one-shot active-overlay refresh
+  coverage for every native mutation and the idempotent no-refresh case.
+
 ## [0.11.1] - 2026-08-17
 
 ### Fixed

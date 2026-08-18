@@ -39,6 +39,7 @@ local PRIVATE_STATE_DIR = os.getenv("GOODREADS_PRIVATE_STATE_DIR")
     or "/var/local/koreader-goodreads-native"
 local ANNOTATION_PENDING_DIR = PRIVATE_STATE_DIR .. "/annotation-pending"
 local ANNOTATION_OUTBOX_DIR = PRIVATE_STATE_DIR .. "/annotation-outbox"
+local ANNOTATION_IDENTITY_DIR = PRIVATE_STATE_DIR .. "/annotation-identities"
 local NATIVE_IMPORT_DIR = PRIVATE_STATE_DIR .. "/native-import"
 local NATIVE_IMPORT_ENABLED_FILE = PRIVATE_STATE_DIR .. "/native-import-enabled"
 local NATIVE_IMPORT_WATCHER = "/mnt/us/koreader/plugins/goodreads.koplugin/bin/watch-native-annotations"
@@ -2458,11 +2459,125 @@ local function nativeAnnotationKey(item)
         .. ":" .. item.end_long .. "@" .. tostring(item.end_short)
 end
 
+local function canonicalNativeRangeKeyValues(
+    start_long, start_short, end_long, end_short
+)
+    if type(start_long) ~= "string" or #start_long ~= 12
+        or not start_long:match("^A[%w%+/]+$")
+        or type(start_short) ~= "number" or start_short < 0
+        or start_short > 2147483647 or start_short ~= math.floor(start_short)
+        or type(end_long) ~= "string" or #end_long ~= 12
+        or not end_long:match("^A[%w%+/]+$")
+        or type(end_short) ~= "number" or end_short < 0
+        or end_short > 2147483647 or end_short ~= math.floor(end_short)
+    then
+        return nil
+    end
+    local first = start_long .. "@" .. tostring(start_short)
+    local second = end_long .. "@" .. tostring(end_short)
+    if second < first then first, second = second, first end
+    return first .. ":" .. second
+end
+
+local function canonicalNativeAnnotationKey(item)
+    if type(item) ~= "table" then return nil end
+    return canonicalNativeRangeKeyValues(
+        item.start_long, item.start_short, item.end_long, item.end_short)
+end
+
+local function canonicalStoredNativeKey(key)
+    if type(key) ~= "string" then return nil end
+    local start_long, start_short, end_long, end_short =
+        key:match("^(A[%w%+/]+)@(%d+):(A[%w%+/]+)@(%d+)$")
+    if not start_long then return nil end
+    return canonicalNativeRangeKeyValues(
+        start_long, tonumber(start_short), end_long, tonumber(end_short))
+end
+
 local function xpointerRangeKey(pos0, pos1)
     if type(pos0) ~= "string" or type(pos1) ~= "string" then return nil end
     local first = pos0 < pos1 and pos0 or pos1
     local second = pos0 < pos1 and pos1 or pos0
     return first .. "\0" .. second
+end
+
+local function readAnnotationIdentityMap(asin)
+    local empty = { by_native = {}, local_to_native = {} }
+    if not isAsin(asin) then return empty end
+    local content = readWholeFile(
+        ANNOTATION_IDENTITY_DIR .. "/" .. asin, 1024 * 1024)
+    if not content then return empty end
+    local body, checksum = content:match("^(.*\n)checksum=([0-9a-f]+)\n?$")
+    if not body or not checksum or #checksum ~= 64 then return empty end
+    local verify, verify_path = openExclusivePrivateTemp(
+        "/tmp/goodreads-identities-verify-XXXXXX")
+    if not verify then return empty end
+    verify:write(body)
+    verify:close()
+    local actual = sha256File(verify_path)
+    os.remove(verify_path)
+    if actual ~= checksum then return empty end
+
+    local fields = {}
+    for line in body:gmatch("[^\r\n]+") do
+        local key, value = line:match("^([%w_%.]+)=(.*)$")
+        if not key or fields[key] ~= nil then return empty end
+        fields[key] = value
+    end
+    local count = tonumber(fields.count)
+    local sequence = tonumber(fields.source_sequence)
+    if fields.identity_version ~= "1" or fields.asin ~= asin
+        or not count or count < 0 or count > 1000
+        or count ~= math.floor(count)
+        or not sequence or sequence < 0 or sequence ~= math.floor(sequence)
+    then
+        return empty
+    end
+    local allowed = {
+        identity_version = true,
+        asin = true,
+        source_sequence = true,
+        count = true,
+    }
+    local result = { by_native = {}, local_to_native = {} }
+    for index = 0, count - 1 do
+        local base = "item." .. tostring(index) .. "."
+        local pos0 = hexDecode(fields[base .. "start_hex"], 65536)
+        local pos1 = hexDecode(fields[base .. "end_hex"], 65536)
+        local start_long = fields[base .. "native_start"]
+        local start_short = tonumber(fields[base .. "native_start_short"])
+        local end_long = fields[base .. "native_end"]
+        local end_short = tonumber(fields[base .. "native_end_short"])
+        allowed[base .. "start_hex"] = true
+        allowed[base .. "end_hex"] = true
+        allowed[base .. "native_start"] = true
+        allowed[base .. "native_start_short"] = true
+        allowed[base .. "native_end"] = true
+        allowed[base .. "native_end_short"] = true
+        local local_key = xpointerRangeKey(pos0, pos1)
+        local native_key = canonicalNativeRangeKeyValues(
+            start_long, start_short, end_long, end_short)
+        if not local_key or not native_key
+            or pos0:sub(1, 1) ~= "/" or pos1:sub(1, 1) ~= "/"
+        then
+            return empty
+        end
+        local candidates = result.by_native[native_key]
+        if not candidates then
+            candidates = {}
+            result.by_native[native_key] = candidates
+        end
+        local duplicate = false
+        for _, candidate in ipairs(candidates) do
+            if candidate == local_key then duplicate = true break end
+        end
+        if not duplicate then table.insert(candidates, local_key) end
+        result.local_to_native[local_key] = native_key
+    end
+    for key in pairs(fields) do
+        if not allowed[key] then return empty end
+    end
+    return result
 end
 
 local function validNativeKey(key)
@@ -2524,15 +2639,28 @@ local function nativeStyleUnchanged(item, provenance)
         and (item.color or "") == (provenance.color or "")
 end
 
-function Goodreads:rememberNativeAnnotationDeletion(items)
+function Goodreads:rememberNativeAnnotationDeletion(items, supplied_identity_map)
     local asin = getBookAsin(self.ui)
     if type(items) ~= "table" or type(items.index_modified) ~= "number"
         or items.index_modified >= 0 or not isAsin(asin)
     then
         return false
     end
-    local provenance = validNativeProvenance(items[1])
-    if not provenance then return false end
+    local deleted_item = items[1]
+    local provenance = validNativeProvenance(deleted_item)
+    local native_key = provenance and provenance.key or nil
+    if not native_key and type(deleted_item) == "table" then
+        local local_key = xpointerRangeKey(deleted_item.pos0, deleted_item.pos1)
+        local identity_map = supplied_identity_map
+            or readAnnotationIdentityMap(asin)
+        if local_key and type(identity_map) == "table"
+            and type(identity_map.local_to_native) == "table"
+        then
+            native_key = identity_map.local_to_native[local_key]
+        end
+    end
+    native_key = canonicalStoredNativeKey(native_key) or native_key
+    if not validNativeKey(native_key) then return false end
     local tombstones = self.settings.native_annotation_tombstones
     if type(tombstones) ~= "table" then
         tombstones = {}
@@ -2552,10 +2680,10 @@ function Goodreads:rememberNativeAnnotationDeletion(items)
             book[key] = nil
         end
     end
-    if book[provenance.key] == nil and count >= 1000 and oldest_key then
+    if book[native_key] == nil and count >= 1000 and oldest_key then
         book[oldest_key] = nil
     end
-    book[provenance.key] = os.time()
+    book[native_key] = os.time()
     self:saveSettings()
     self:debugLog("native_annotation_tombstoned", {
         trigger = "local_delete",
@@ -2565,14 +2693,73 @@ function Goodreads:rememberNativeAnnotationDeletion(items)
     return true
 end
 
-function Goodreads:applyNativeAnnotationImport(reader, snapshot, positions)
+function Goodreads:applyNativeAnnotationImport(
+    reader, snapshot, positions, supplied_identity_map
+)
     local allow_deletions = snapshot.snapshot_complete == true
     local annotations = reader.annotation and reader.annotation.annotations or {}
     local existing = {}
     for _, item in ipairs(annotations) do
         if item.drawer and type(item.pos0) == "string" and type(item.pos1) == "string" then
-            existing[xpointerRangeKey(item.pos0, item.pos1)] = item
+            local range_key = xpointerRangeKey(item.pos0, item.pos1)
+            local previous = existing[range_key]
+            if not previous or (validNativeProvenance(previous)
+                and not validNativeProvenance(item))
+            then
+                existing[range_key] = item
+            end
         end
+    end
+
+    local identity_map = supplied_identity_map
+        or readAnnotationIdentityMap(snapshot.asin)
+    if type(identity_map) ~= "table"
+        or type(identity_map.by_native) ~= "table"
+        or type(identity_map.local_to_native) ~= "table"
+    then
+        identity_map = { by_native = {}, local_to_native = {} }
+    end
+    local existing_by_native = {}
+    local function addNativeCandidate(native_key, item)
+        if not native_key or type(item) ~= "table" then return end
+        local candidates = existing_by_native[native_key]
+        if not candidates then
+            candidates = {}
+            existing_by_native[native_key] = candidates
+        end
+        for _, candidate in ipairs(candidates) do
+            if candidate == item then return end
+        end
+        table.insert(candidates, item)
+    end
+    for local_key, native_key in pairs(identity_map.local_to_native) do
+        addNativeCandidate(native_key, existing[local_key])
+    end
+    for _, item in ipairs(annotations) do
+        local provenance = validNativeProvenance(item)
+        if provenance then
+            addNativeCandidate(canonicalStoredNativeKey(provenance.key), item)
+        end
+    end
+
+    local function chooseNativeCandidate(native_key, exact)
+        local candidates = existing_by_native[native_key] or {}
+        if exact then addNativeCandidate(native_key, exact) end
+        candidates = existing_by_native[native_key] or candidates
+        local local_candidate
+        local local_count = 0
+        for _, candidate in ipairs(candidates) do
+            local provenance = validNativeProvenance(candidate)
+            if not provenance or provenance.highlight_created ~= true then
+                local_candidate = candidate
+                local_count = local_count + 1
+            end
+        end
+        if local_count == 1 then return local_candidate end
+        if exact then return exact end
+        if #candidates == 1 then return candidates[1] end
+        if #candidates > 1 then return nil, "ambiguous native annotation identity" end
+        return nil
     end
 
     local modified, modified_set = {}, {}
@@ -2583,13 +2770,16 @@ function Goodreads:applyNativeAnnotationImport(reader, snapshot, positions)
         end
     end
 
-    local native_keys, additions = {}, {}
+    local native_keys, canonical_native_keys, additions = {}, {}, {}
     local tombstones = isAsin(snapshot.asin)
         and type(self.settings.native_annotation_tombstones) == "table"
         and self.settings.native_annotation_tombstones[snapshot.asin] or nil
     if type(tombstones) ~= "table" then tombstones = {} end
     local tombstones_to_clear = {}
     local tombstones_blocked = 0
+    local identity_matches, identity_echoes_blocked = 0, 0
+    local duplicate_imports_to_remove = {}
+    local duplicate_imports_collapsed = 0
     local highlight_delta, note_delta = 0, 0
     local added, deleted, notes_added, notes_updated, notes_deleted = 0, 0, 0, 0, 0
     local ownership_detached, legacy_detached = 0, 0
@@ -2598,18 +2788,53 @@ function Goodreads:applyNativeAnnotationImport(reader, snapshot, positions)
         local translated = positions[index]
         local pos0, pos1 = translated.start.xpointer, translated["end"].xpointer
         local native_key = nativeAnnotationKey(imported)
+        local canonical_native_key = canonicalNativeAnnotationKey(imported)
         local position_key = xpointerRangeKey(pos0, pos1)
-        if not native_key or not position_key then return false, "invalid native import identity" end
+        if not native_key or not canonical_native_key or not position_key then
+            return false, "invalid native import identity"
+        end
         native_keys[native_key] = true
-        local current = existing[position_key]
-        if tombstones[native_key] ~= nil and not current then
+        canonical_native_keys[canonical_native_key] = true
+        local exact = existing[position_key]
+        local current, identity_error = chooseNativeCandidate(
+            canonical_native_key, exact)
+        if identity_error then return false, identity_error end
+        if current and current ~= exact then
+            identity_matches = identity_matches + 1
+        end
+        if current then
+            local winner_provenance = validNativeProvenance(current)
+            local winner_is_local = not winner_provenance
+                or winner_provenance.highlight_created ~= true
+            if winner_is_local then
+                for _, candidate in ipairs(
+                    existing_by_native[canonical_native_key] or {}
+                ) do
+                    local candidate_provenance = candidate ~= current
+                        and validNativeProvenance(candidate) or nil
+                    if candidate_provenance
+                        and candidate_provenance.highlight_created == true
+                        and (candidate.note or "")
+                            == candidate_provenance.note_value
+                        and nativeStyleUnchanged(
+                            candidate, candidate_provenance)
+                    then
+                        duplicate_imports_to_remove[candidate] = true
+                    end
+                end
+            end
+        end
+        local tombstone_key = tombstones[canonical_native_key] ~= nil
+            and canonical_native_key
+            or (tombstones[native_key] ~= nil and native_key or nil)
+        if tombstone_key and not current then
             -- Suppress a stale native echo until a complete snapshot omits the
             -- key and thereby confirms the outbound deletion.
             tombstones_blocked = tombstones_blocked + 1
         elseif current then
-            if tombstones[native_key] ~= nil then
+            if tombstone_key then
                 -- The range exists locally again, so the user recreated or kept it.
-                tombstones_to_clear[native_key] = true
+                tombstones_to_clear[tombstone_key] = true
             end
             local had_native_metadata = current.goodreads_native_import ~= nil
                 or current.goodreads_native_provenance ~= nil
@@ -2690,6 +2915,12 @@ function Goodreads:applyNativeAnnotationImport(reader, snapshot, positions)
                 note_delta = note_delta + 1
                 notes_added = notes_added + 1
             end
+        elseif identity_map.by_native[canonical_native_key] ~= nil then
+            -- This exact Kindle range was previously exported from KOReader,
+            -- but its source range no longer exists locally. Treat it as a
+            -- stale native echo and let the converged outbound snapshot remove
+            -- it instead of resurrecting a deleted local highlight.
+            identity_echoes_blocked = identity_echoes_blocked + 1
         else
             table.insert(additions, {
                 imported = imported,
@@ -2702,7 +2933,10 @@ function Goodreads:applyNativeAnnotationImport(reader, snapshot, positions)
     end
 
     for key in pairs(tombstones) do
-        if allow_deletions and validNativeKey(key) and not native_keys[key] then
+        local canonical_key = canonicalStoredNativeKey(key)
+        local observed = native_keys[key]
+            or (canonical_key and canonical_native_keys[canonical_key])
+        if allow_deletions and validNativeKey(key) and not observed then
             tombstones_to_clear[key] = true
         end
     end
@@ -2712,7 +2946,20 @@ function Goodreads:applyNativeAnnotationImport(reader, snapshot, positions)
     for annotation_index = #annotations, 1, -1 do
         local item = annotations[annotation_index]
         local provenance = validNativeProvenance(item)
-        if allow_deletions and provenance and not native_keys[provenance.key] then
+        if duplicate_imports_to_remove[item] then
+            local current_note = item.note or ""
+            table.remove(annotations, annotation_index)
+            clearNativeProvenance(item)
+            markModified(item)
+            deleted = deleted + 1
+            duplicate_imports_collapsed = duplicate_imports_collapsed + 1
+            if current_note == "" then
+                highlight_delta = highlight_delta - 1
+            else
+                note_delta = note_delta - 1
+                notes_deleted = notes_deleted + 1
+            end
+        elseif allow_deletions and provenance and not native_keys[provenance.key] then
             local current_note = item.note or ""
             local note_unchanged = current_note == provenance.note_value
             if provenance.highlight_created and note_unchanged
@@ -2834,6 +3081,8 @@ function Goodreads:applyNativeAnnotationImport(reader, snapshot, positions)
         legacy_detached = legacy_detached,
         tombstones_blocked = tombstones_blocked,
         tombstones_cleared = tombstones_cleared,
+        duplicates_collapsed = identity_matches + identity_echoes_blocked
+            + duplicate_imports_collapsed,
         status = #modified > 0 and "merged" or "already_current",
     })
     return true
@@ -3176,8 +3425,10 @@ function Goodreads:init()
     elseif self.reading_history_recovered then
         logger.warn("GoodreadsNative: private reading history recovered from backup")
     end
+    self:attachToUi()
     self.ui.menu:registerToMainMenu(self)
     self:applyReaderHook()
+    self:applyAnnotationNoteHook()
     if not outbox_resume_scheduled then
         outbox_resume_scheduled = true
         UIManager:scheduleIn(0, function()
@@ -3191,6 +3442,14 @@ end
 
 function Goodreads:saveSettings()
     G_reader_settings:saveSetting("goodreads_native", self.settings)
+end
+
+--- Publish the active document-scoped instance for global ReaderUI hooks.
+--- KOReader's plugin loader does not create this reverse lookup itself.
+function Goodreads:attachToUi()
+    if not self.ui then return false end
+    self.ui.goodreads_native = self
+    return true
 end
 
 function Goodreads:debugLog(event, fields)
@@ -3443,6 +3702,7 @@ function Goodreads:setProgressInterval(seconds)
 end
 
 function Goodreads:onReaderReady()
+    self:attachToUi()
     self:scheduleProgressTimer()
     UIManager:scheduleIn(0.5, function()
         if self.ui and self.ui.document then
@@ -3519,6 +3779,41 @@ function Goodreads:onAnnotationsModified(items)
         status = self.settings.annotation_sync_enabled and "sync_scheduled" or "sync_disabled",
     })
     self:scheduleAnnotationReconcile("annotations_modified")
+end
+
+--- KOReader emits AnnotationsModified when a highlight becomes a note (or a
+--- note becomes a highlight), but not when the text of an existing note is
+--- edited. ReaderBookmark's save callback runs after the new note has been
+--- committed in memory, so use it to schedule the same coalesced full-state
+--- snapshot without retaining the note text in plugin state or diagnostics.
+function Goodreads:onAnnotationNoteSaved(reader)
+    if self.native_import_event_inflight or not reader or not reader.document then
+        return false
+    end
+    local stats = annotationStats(reader)
+    self.last_annotation_event = {
+        time = os.time(),
+        changed = 1,
+        stats = stats,
+    }
+    self:debugLog("annotations_modified", {
+        trigger = "note_saved",
+        changed = 1,
+        annotations = stats.total,
+        highlights = stats.highlights,
+        notes = stats.notes,
+        bookmarks = stats.bookmarks,
+        status = self.settings.annotation_sync_enabled and "sync_scheduled" or "sync_disabled",
+    })
+    self:scheduleAnnotationReconcile("note_saved")
+    return true
+end
+
+--- Receive the class-level ReaderBookmark save notification through ReaderUI.
+--- Dispatching an event resolves the active document plugin even on KOReader
+--- builds that do not expose plugin instances back through the ReaderUI table.
+function Goodreads:onGoodreadsAnnotationNoteSaved()
+    return self:onAnnotationNoteSaved(self.ui)
 end
 
 function Goodreads:maybePromptForRating(asin)
@@ -3598,6 +3893,57 @@ function Goodreads:applyReaderHook()
 
     ReaderUI._goodreads_native_sync_installed = true
     logger.info("GoodreadsNative: ReaderUI close hook installed")
+end
+
+--- Observe successful saves from KOReader's note editor. The original method
+--- opens the dialog asynchronously and invokes caller_callback only after the
+--- annotation has been updated, so wrapping that callback cannot run on
+--- cancel and does not need to inspect or retain the note text.
+function Goodreads:applyAnnotationNoteHook()
+    local ok, ReaderBookmark = pcall(require, "apps/reader/modules/readerbookmark")
+    if not ok or not ReaderBookmark
+        or type(ReaderBookmark.setBookmarkNote) ~= "function"
+    then
+        logger.warn("GoodreadsNative: ReaderBookmark.setBookmarkNote is unavailable")
+        return
+    end
+    if ReaderBookmark._goodreads_native_note_save_installed then
+        return
+    end
+
+    local original_set_bookmark_note = ReaderBookmark.setBookmarkNote
+    local plugin = self
+    ReaderBookmark.setBookmarkNote = function(
+        bookmark, item_or_index, is_new_note, new_note, caller_callback
+    )
+        local function note_saved_callback(...)
+            local reader = bookmark and bookmark.ui
+            local event_dispatched = false
+            if reader and type(reader.handleEvent) == "function" then
+                event_dispatched = pcall(
+                    reader.handleEvent,
+                    reader,
+                    Event:new("GoodreadsAnnotationNoteSaved"))
+            end
+            if not event_dispatched then
+                local active_plugin = reader and reader.goodreads_native or plugin
+                if active_plugin
+                    and type(active_plugin.onAnnotationNoteSaved) == "function"
+                then
+                    active_plugin:onAnnotationNoteSaved(reader)
+                end
+            end
+            if type(caller_callback) == "function" then
+                return caller_callback(...)
+            end
+        end
+        return original_set_bookmark_note(
+            bookmark, item_or_index, is_new_note, new_note,
+            note_saved_callback)
+    end
+
+    ReaderBookmark._goodreads_native_note_save_installed = true
+    logger.info("GoodreadsNative: ReaderBookmark note-save hook installed")
 end
 
 function Goodreads:rateBook(asin, rating, on_complete)

@@ -116,7 +116,11 @@ the native annotation manager for create, update, and delete operations.
 Persisted annotations may report their start and end positions in the opposite
 order from the translated KOReader range. Reconciliation therefore identifies
 ranges without direction and attaches notes using the persisted highlight's
-native endpoint order.
+native endpoint order. Reverse translation can also reconstruct a terminal
+inclusive/exclusive endpoint one character earlier than KOReader's original
+XPointer while preserving the same exact KFX EID/offset pair. A root-only
+outbound identity receipt makes that KFX pair authoritative and prevents the
+round trip from creating an echo duplicate.
 The manager's durable methods do not select either optional cloud bridge on
 this firmware: `WhisperStoreKwisUtils.Ls()` and
 `KSDKAnnotationsConfig.Em()` both return false. Native Kindle writes instead

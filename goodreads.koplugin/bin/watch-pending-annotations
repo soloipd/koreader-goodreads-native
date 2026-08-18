@@ -16,7 +16,6 @@ WATCH_LOCK="$LOCK_ROOT/goodreads-annotation-watcher.lock"
 LIPC_WAIT_EVENT="${GOODREADS_LIPC_WAIT_EVENT:-/usr/bin/lipc-wait-event}"
 LIPC_GET_PROP="${GOODREADS_LIPC_GET_PROP:-/usr/bin/lipc-get-prop}"
 DBUS_MONITOR="${GOODREADS_DBUS_MONITOR:-/usr/bin/dbus-monitor}"
-TIMEOUT_BIN="${GOODREADS_TIMEOUT_BIN:-/usr/bin/timeout}"
 USLEEP_BIN="${GOODREADS_USLEEP_BIN:-/bin/usleep}"
 BOOK_LOCK_ROOT="$LOCK_ROOT"
 TMP_ROOT="${GOODREADS_TMP_DIR:-/tmp}"
@@ -51,11 +50,36 @@ elif [ "$#" -ne 0 ]; then
     exit 2
 fi
 
+monitor_pid=""
+monitor_fifo=""
+cleanup_monitor() {
+    if [ -n "$monitor_pid" ]; then
+        kill -TERM "$monitor_pid" 2>/dev/null || true
+        wait "$monitor_pid" 2>/dev/null || true
+        monitor_pid=""
+    fi
+    if [ -n "$monitor_fifo" ] && [ -p "$monitor_fifo" ]; then
+        rm -f "$monitor_fifo"
+    fi
+    monitor_fifo=""
+}
+
+clear_attempt_markers() {
+    [ -d "$WATCH_LOCK" ] || return 0
+    for marker in "$WATCH_LOCK"/active-* "$WATCH_LOCK"/attempted-*; do
+        [ -d "$marker" ] || continue
+        rmdir "$marker" 2>/dev/null || true
+    done
+}
+
 if [ -z "$once_asin" ]; then
     if ! mkdir "$WATCH_LOCK" 2>/dev/null; then
         exit 0
     fi
+    chmod 0700 "$WATCH_LOCK" 2>/dev/null || true
     cleanup_watcher() {
+        cleanup_monitor
+        clear_attempt_markers
         rmdir "$WATCH_LOCK" 2>/dev/null || true
     }
     trap cleanup_watcher EXIT
@@ -115,11 +139,11 @@ replay_reader_start() {
     attempt=0
     while pending_exists && [ "$attempt" -lt 3 ]; do
         case "$attempt" in
-            0) settle_us=200000 ;;
-            1) settle_us=600000 ;;
-            *) settle_us=1200000 ;;
+            0) settle_us=0 ;;
+            1) settle_us=200000 ;;
+            *) settle_us=600000 ;;
         esac
-        if [ -x "$USLEEP_BIN" ]; then
+        if [ "$settle_us" -gt 0 ] && [ -x "$USLEEP_BIN" ]; then
             "$USLEEP_BIN" "$settle_us"
         fi
         replay_pending || true
@@ -128,19 +152,38 @@ replay_reader_start() {
 }
 
 listen_for_reader_start() {
-    [ -x "$DBUS_MONITOR" ] && [ -x "$TIMEOUT_BIN" ] || return 1
-    awaiting_app_name=0
-    "$TIMEOUT_BIN" 30 "$DBUS_MONITOR" --system \
+    [ -x "$DBUS_MONITOR" ] || return 1
+    monitor_fifo="$WATCH_LOCK/appstarted.fifo"
+    if ! mkfifo "$monitor_fifo" 2>/dev/null; then
+        monitor_fifo=""
+        return 1
+    fi
+    chmod 0600 "$monitor_fifo" 2>/dev/null || true
+    "$DBUS_MONITOR" --system \
         "type='signal',interface='com.lab126.appmgrd',member='appStarted'" \
-        2>/dev/null | while IFS= read -r line; do
+        >"$monitor_fifo" 2>/dev/null &
+    monitor_pid=$!
+    awaiting_app_name=0
+    while IFS= read -r line; do
             case "$line" in
                 *'interface=com.lab126.appmgrd; member=appStarted'*)
                     awaiting_app_name=1
                     ;;
-                *'string "com.lab126.booklet.reader"'*)
+                *'string "'*)
                     if [ "$awaiting_app_name" -eq 1 ]; then
-                        replay_reader_start
-                        pending_exists || break
+                        case "$line" in
+                            *'string "com.lab126.booklet.reader"'*)
+                                replay_matching_active_reader
+                                pending_exists || break
+                                ;;
+                            *)
+                                # A real transition away from the reader arms
+                                # the next exact native-book activation. In
+                                # particular, this does not arm on the helper's
+                                # own reader-start notification.
+                                clear_attempt_markers
+                                ;;
+                        esac
                     fi
                     awaiting_app_name=0
                     ;;
@@ -148,7 +191,62 @@ listen_for_reader_start() {
                     awaiting_app_name=0
                     ;;
             esac
-        done
+        done <"$monitor_fifo"
+    cleanup_monitor
+    pending_exists && return 1
+    return 0
+}
+
+# A resident KPP reader can transition during the small interval between one
+# bounded DBus monitor exiting and its replacement subscribing. Recover that
+# missed edge without general polling: retry only when appmgrd says the native
+# reader is active and its exact local file URI contains a pending ASIN. Empty
+# directories under the root-only watcher lock are atomic, text-free attempt
+# markers. This is required because attaching the native helper can itself emit
+# appStarted.
+replay_matching_active_reader() {
+    [ -x "$LIPC_GET_PROP" ] || return 0
+    active_app="$(
+        "$LIPC_GET_PROP" com.lab126.appmgrd activeApp 2>/dev/null \
+            | sed -n '1p'
+    )"
+    if [ "$active_app" != "com.lab126.booklet.reader" ]; then
+        clear_attempt_markers
+        return 0
+    fi
+    active_context="$(
+        "$LIPC_GET_PROP" com.lab126.appmgrd activeContext 2>/dev/null \
+            | sed -n '1p'
+    )"
+    for pending in "$PENDING_DIR"/B?????????; do
+        [ -f "$pending" ] || continue
+        asin="$(basename "$pending")"
+        case "$active_context" in
+            *file:///mnt/us/documents/*"$asin"*.kfx)
+                snapshot_sequence="$(
+                    sed -n 's/^outbox_sequence=//p' "$pending" 2>/dev/null \
+                        | sed -n '1p'
+                )"
+                case "$snapshot_sequence" in
+                    ''|*[!0-9]*) snapshot_sequence=legacy ;;
+                esac
+                active_marker="$WATCH_LOCK/active-$asin"
+                if [ ! -d "$active_marker" ]; then
+                    clear_attempt_markers
+                    mkdir "$active_marker" 2>/dev/null || return 0
+                fi
+                attempt_marker="$WATCH_LOCK/attempted-$asin-$snapshot_sequence"
+                if ! mkdir "$attempt_marker" 2>/dev/null; then
+                    return 0
+                fi
+                replay_reader_start
+                return 0
+                ;;
+        esac
+    done
+    # The reader is showing another book or a non-local placeholder. That is a
+    # genuine transition away from any pending exact native book.
+    clear_attempt_markers
 }
 
 if [ -n "$once_asin" ]; then
@@ -157,16 +255,19 @@ if [ -n "$once_asin" ]; then
 fi
 
 # A pending snapshot may have been queued while the native book was already
-# activating, so try once before blocking for the next application start.
-replay_pending || true
+# activating. Probe only an exact matching active URI; a blind attach while
+# KOReader or Home is active wastes retries and can outlive the useful handle.
+replay_matching_active_reader
 
 # KPPMainApp remains resident on newer firmware, so LIPC appStarted can miss
 # the short-lived ReaderSDK handle even though the system DBus appStarted
-# signal is emitted. A filtered DBus listener sleeps in the kernel and wakes at
-# the exact reader handoff; the bounded loop lets us notice external success or
-# a monitor restart without polling the device continuously.
-while pending_exists && [ -x "$DBUS_MONITOR" ] && [ -x "$TIMEOUT_BIN" ]; do
-    listen_for_reader_start || true
+# signal is emitted. One tracked filtered DBus listener sleeps in the kernel
+# and wakes at the exact reader handoff. It stays subscribed until the queue is
+# consumed or the monitor exits, avoiding resubscription gaps and process churn.
+while pending_exists && [ -x "$DBUS_MONITOR" ]; do
+    replay_matching_active_reader
+    pending_exists || break
+    listen_for_reader_start || break
 done
 
 last_active_app=""
@@ -187,8 +288,12 @@ while pending_exists; do
         active_attempts=0
     fi
     if [ "$active_app" = "com.lab126.booklet.reader" ] \
-        && { [ "$event_seen" -eq 1 ] || [ "$active_attempts" -lt 3 ]; }; then
-        replay_pending || true
+        && [ "$event_seen" -eq 1 ]; then
+        replay_matching_active_reader
+        active_attempts=$((active_attempts + 1))
+    elif [ "$active_app" = "com.lab126.booklet.reader" ] \
+        && [ "$active_attempts" -lt 3 ]; then
+        replay_matching_active_reader
         active_attempts=$((active_attempts + 1))
     fi
     last_active_app="$active_app"

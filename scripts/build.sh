@@ -7,7 +7,7 @@ source_dir="$project_root/agent/src"
 build_dir="$project_root/agent/build/jdk"
 classes_dir="$build_dir/classes"
 agent_jar="$project_root/goodreads.koplugin/bin/goodreads-progress-agent-v2.jar"
-annotation_agent_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-agent-v30.jar"
+annotation_agent_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-agent-v31.jar"
 annotation_export_jar="$project_root/goodreads.koplugin/bin/goodreads-annotation-export-agent-v3.jar"
 launcher_class="$project_root/goodreads.koplugin/bin/classes/AttachLauncher.class"
 
@@ -68,7 +68,7 @@ find "$(dirname "$annotation_export_jar")" -maxdepth 1 -type f \
 "$javac_bin" --release 8 -d "$classes_dir" \
     "$source_dir/AttachLauncher.java" \
     "$source_dir/GoodreadsProgressAgentV2.java" \
-    "$source_dir/GoodreadsAnnotationAgentV30.java" \
+    "$source_dir/GoodreadsAnnotationAgentV31.java" \
     "$source_dir/GoodreadsAnnotationExportAgentV3.java"
 
 reproducible_jar "$agent_jar" "$project_root/agent/manifest-progress.mf" \
@@ -76,13 +76,13 @@ reproducible_jar "$agent_jar" "$project_root/agent/manifest-progress.mf" \
     -C "$classes_dir" 'GoodreadsProgressAgentV2$RequestArguments.class'
 
 reproducible_jar "$annotation_agent_jar" "$project_root/agent/manifest-annotations.mf" \
-    -C "$classes_dir" GoodreadsAnnotationAgentV30.class \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV30$1.class' \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV30$CloudAnnotationHandler.class' \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV30$Record.class' \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV30$RangeEndpoint.class' \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV30$RangeIdentity.class' \
-    -C "$classes_dir" 'GoodreadsAnnotationAgentV30$Counters.class'
+    -C "$classes_dir" GoodreadsAnnotationAgentV31.class \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV31$1.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV31$CloudAnnotationHandler.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV31$Record.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV31$RangeEndpoint.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV31$RangeIdentity.class' \
+    -C "$classes_dir" 'GoodreadsAnnotationAgentV31$Counters.class'
 
 reproducible_jar "$annotation_export_jar" "$project_root/agent/manifest-annotation-export.mf" \
     -C "$classes_dir" GoodreadsAnnotationExportAgentV3.class \
@@ -98,7 +98,8 @@ chmod 0755 "$project_root/goodreads.koplugin/bin/sync-progress" \
     "$project_root/goodreads.koplugin/bin/exit-koreader-after-native-handoff" \
     "$project_root/goodreads.koplugin/bin/watch-pending-annotations" \
     "$project_root/goodreads.koplugin/bin/manage-sync-receipts" \
-    "$project_root/goodreads.koplugin/bin/acknowledge-annotation-outbox"
+    "$project_root/goodreads.koplugin/bin/acknowledge-annotation-outbox" \
+    "$project_root/goodreads.koplugin/bin/persist-annotation-identities"
 chmod 0755 "$project_root/goodreads.koplugin/bin/goodreads-doctor" \
     "$project_root/tests/test_doctor.sh"
 chmod 0755 "$project_root/tests/test_release_stress.sh"

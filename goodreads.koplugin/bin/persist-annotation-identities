@@ -1,0 +1,106 @@
+#!/bin/sh
+
+# Persist a text-free mapping from KOReader XPointer ranges to the exact KFX
+# coordinates accepted by Kindle. Native import uses this receipt to recognize
+# its own outbound annotations even when inclusive/exclusive endpoint spelling
+# differs by one character on the reverse translation.
+
+set -u
+
+PRIVATE_STATE_DIR="${GOODREADS_PRIVATE_STATE_DIR:-/var/local/koreader-goodreads-native}"
+OUTBOX_DIR="$PRIVATE_STATE_DIR/annotation-outbox"
+IDENTITY_DIR="$PRIVATE_STATE_DIR/annotation-identities"
+SHA256_TOOL="${GOODREADS_SHA256_TOOL:-/usr/bin/sha256sum}"
+
+[ "$#" -eq 4 ] || exit 2
+asin="$1"
+sequence="$2"
+checksum="$3"
+payload="$4"
+
+printf '%s\n' "$asin" | grep -Eq '^B[A-Z0-9]{9}$' || exit 2
+case "$sequence" in ''|*[!0-9]*) exit 2 ;; esac
+case "$checksum" in ''|*[!0-9a-f]*) exit 2 ;; esac
+[ "${#checksum}" -eq 64 ] || exit 2
+payload_id="${payload#/tmp/goodreads-annotation-pending-}"
+[ "$payload" = "/tmp/goodreads-annotation-pending-$payload_id" ] || exit 2
+case "$payload_id" in ''|*[!0-9]*) exit 2 ;; esac
+
+source_file="$OUTBOX_DIR/$asin"
+[ -f "$source_file" ] && [ ! -L "$source_file" ] || exit 3
+[ -f "$payload" ] && [ ! -L "$payload" ] || exit 3
+grep -Fqx "sequence=$sequence" "$source_file" || exit 4
+grep -Fqx "checksum=$checksum" "$source_file" || exit 4
+grep -Fqx "asin=$asin" "$source_file" || exit 4
+grep -Fqx "asin=$asin" "$payload" || exit 4
+actual_checksum="$(
+    sed '$d' "$source_file" | "$SHA256_TOOL" 2>/dev/null | awk '{ print $1 }'
+)"
+[ "$actual_checksum" = "$checksum" ] || exit 4
+
+source_count="$(sed -n 's/^desired_count=//p' "$source_file" | sed -n '1p')"
+payload_count="$(sed -n 's/^desired_count=//p' "$payload" | sed -n '1p')"
+case "$source_count:$payload_count" in
+    :*|*:) exit 4 ;;
+    *[!0-9:]*) exit 4 ;;
+esac
+[ "$source_count" = "$payload_count" ] || exit 4
+[ "$source_count" -le 1000 ] || exit 4
+
+mkdir -p "$IDENTITY_DIR" || exit 5
+chmod 0700 "$PRIVATE_STATE_DIR" "$IDENTITY_DIR" 2>/dev/null || true
+temp="$IDENTITY_DIR/.$asin.$sequence.$$"
+cleanup() { rm -f "$temp"; }
+trap cleanup EXIT HUP INT TERM
+
+if ! awk -F= -v asin="$asin" -v sequence="$sequence" '
+    FNR == NR {
+        if ($1 ~ /^desired\.[0-9]+\.(start_hex|end_hex)$/) source[$1]=$2
+        if ($1 == "desired_count") source_count=$2
+        next
+    }
+    {
+        if ($1 ~ /^desired\.[0-9]+\.(start|start_short|end|end_short)$/) payload[$1]=$2
+        if ($1 == "desired_count") payload_count=$2
+    }
+    END {
+        if (source_count !~ /^[0-9]+$/ || source_count != payload_count ||
+            source_count + 0 > 1000) exit 1
+        print "identity_version=1"
+        print "asin=" asin
+        print "source_sequence=" sequence
+        print "count=" source_count
+        for (i=0; i < source_count + 0; i++) {
+            base="desired." i "."
+            start_hex=source[base "start_hex"]
+            end_hex=source[base "end_hex"]
+            native_start=payload[base "start"]
+            native_start_short=payload[base "start_short"]
+            native_end=payload[base "end"]
+            native_end_short=payload[base "end_short"]
+            if (start_hex !~ /^[0-9a-f]+$/ || length(start_hex) % 2 != 0 ||
+                end_hex !~ /^[0-9a-f]+$/ || length(end_hex) % 2 != 0 ||
+                native_start !~ /^A[A-Za-z0-9+\/]+$/ || length(native_start) != 12 ||
+                native_end !~ /^A[A-Za-z0-9+\/]+$/ || length(native_end) != 12 ||
+                native_start_short !~ /^[0-9]+$/ ||
+                native_end_short !~ /^[0-9]+$/) exit 1
+            print "item." i ".start_hex=" start_hex
+            print "item." i ".end_hex=" end_hex
+            print "item." i ".native_start=" native_start
+            print "item." i ".native_start_short=" native_start_short
+            print "item." i ".native_end=" native_end
+            print "item." i ".native_end_short=" native_end_short
+        }
+    }
+' "$source_file" "$payload" >"$temp"; then
+    exit 6
+fi
+
+chmod 0600 "$temp" || exit 5
+digest="$($SHA256_TOOL "$temp" 2>/dev/null | awk '{ print $1 }')"
+case "$digest" in ''|*[!0-9a-f]*) exit 6 ;; esac
+[ "${#digest}" -eq 64 ] || exit 6
+printf 'checksum=%s\n' "$digest" >>"$temp" || exit 6
+mv -f "$temp" "$IDENTITY_DIR/$asin" || exit 5
+trap - EXIT HUP INT TERM
+exit 0
