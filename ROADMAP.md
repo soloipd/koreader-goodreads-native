@@ -55,6 +55,18 @@ Status labels describe `main`, not unreleased experiments:
   credentials, annotation text, or device identifiers.
 - Add privacy fixtures, fault injection, and a 1,003-process tree stress case.
 
+### Done — Bookshelf completion and rating bridge
+
+- Observe KOReader's successful long-press summary saves without modifying
+  KOReader core files.
+- Observe the separate in-reader **Book status** flush, while distinguishing a
+  real star/status edit from KOReader's unchanged initial star rendering.
+- Publish Finished ASIN-backed books as Read and activate the one-time chooser.
+- Synchronize explicit star creation, edits, and clears with per-book
+  serialization and unchanged-value dedupe. Completion shelf writes wait for
+  the rating lane to drain, preventing two native Goodreads requests from
+  racing; unfinished, non-ASIN, and free-form review data remains local.
+
 ### Next — reading-position source of truth (companion `kindle.koplugin`)
 
 - Model live KOReader, persisted KOReader, native page, shelf badge, Goodreads

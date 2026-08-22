@@ -220,6 +220,18 @@ local function isAsin(value)
     return type(value) == "string" and value:match("^B[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]$") ~= nil
 end
 
+local function normalizeRating(value, allow_clear)
+    value = tonumber(value)
+    if not value or value ~= math.floor(value) then
+        return nil
+    end
+    local minimum = allow_clear and 0 or 1
+    if value < minimum or value > 5 then
+        return nil
+    end
+    return value
+end
+
 local function hexDecode(value, maximum)
     if type(value) ~= "string" or #value % 2 ~= 0 or #value > maximum * 2
         or value:find("[^0-9a-f]")
@@ -3408,6 +3420,8 @@ function Goodreads:init()
     self.progress_timer_scheduled = false
     self.progress_timer_generation = 0
     self.rating_prompt_scheduled = {}
+    self.bookshelf_rating_inflight = {}
+    self.bookshelf_rating_pending = {}
     self.annotation_sync_generation = 0
     self.annotation_retry_counts = {}
     self.annotation_request_ids = {}
@@ -3429,6 +3443,8 @@ function Goodreads:init()
     self.ui.menu:registerToMainMenu(self)
     self:applyReaderHook()
     self:applyAnnotationNoteHook()
+    self:applyBookshelfSummaryHook()
+    self:applyBookStatusHook()
     if not outbox_resume_scheduled then
         outbox_resume_scheduled = true
         UIManager:scheduleIn(0, function()
@@ -3836,12 +3852,307 @@ function Goodreads:maybePromptForRating(asin)
         self.rating_prompt_scheduled[asin] = nil
         if not self.settings.rating_prompted[asin]
             and not self.settings.ratings[asin]
+            and self.bookshelf_rating_inflight[asin] == nil
         then
             self.settings.rating_prompted[asin] = os.time()
             self:saveSettings()
             self:showRatingDialog(asin)
         end
     end)
+end
+
+--- Publish a completion checkpoint captured by a KOReader summary save.
+--- Keeping the immutable values together lets the rating lane defer the shelf
+--- write until the native rating command has released Goodreads' service.
+function Goodreads:syncSummaryCompletion(completion)
+    if type(completion) ~= "table" then
+        return true, "no completion checkpoint"
+    end
+    return self:syncCapturedCheckpoint(
+        completion.asin,
+        completion.percent,
+        "complete",
+        completion.trigger,
+        completion.resolver
+    )
+end
+
+--- Serialize rating changes made through KOReader's local summary controls. A
+--- second star choice made while the native service is busy replaces stale
+--- queued work, while an unchanged choice is ignored. Rating zero represents
+--- the user's explicit removal of a previously synchronized rating. When the
+--- same save also needs a Read checkpoint, that checkpoint is held until the
+--- rating lane drains so Kindle's shelf and rating services cannot race.
+function Goodreads:syncBookshelfRating(asin, rating, trigger, completion)
+    rating = normalizeRating(rating, true)
+    if not isAsin(asin) or rating == nil then
+        return false, "invalid KOReader rating"
+    end
+    trigger = trigger == "book_status" and "book_status" or "bookshelf"
+
+    local current_rating = normalizeRating(self.settings.ratings[asin], false)
+    local inflight_rating = self.bookshelf_rating_inflight[asin]
+    if inflight_rating == nil
+        and ((rating == 0 and current_rating == nil)
+            or rating == current_rating)
+    then
+        self:debugLog("rating_skipped", {
+            trigger = trigger,
+            asin = asin,
+            rating = rating,
+            status = "unchanged",
+            success = true,
+        })
+        self:syncSummaryCompletion(completion)
+        return true, "unchanged"
+    end
+
+    if inflight_rating ~= nil then
+        self.bookshelf_rating_pending[asin] = {
+            rating = rating,
+            trigger = trigger,
+            completion = completion,
+        }
+        self:debugLog("rating_coalesced", {
+            trigger = trigger,
+            asin = asin,
+            rating = rating,
+            status = rating == inflight_rating
+                    and "matches_inflight" or "latest_choice_pending",
+        })
+        return true, "coalesced"
+    end
+
+    self.bookshelf_rating_inflight[asin] = rating
+    local queued, detail = self:rateBook(asin, rating, function(ok, result_detail)
+        self.bookshelf_rating_inflight[asin] = nil
+        local pending = self.bookshelf_rating_pending[asin]
+        self.bookshelf_rating_pending[asin] = nil
+
+        if not ok then
+            UIManager:show(InfoMessage:new({
+                text = string.format(
+                    _("Could not sync the KOReader rating: %s"),
+                    result_detail or _("unknown error")
+                ),
+                timeout = 5,
+            }))
+        end
+
+        if pending ~= nil then
+            local saved_rating = normalizeRating(
+                self.settings.ratings[asin], false) or 0
+            if pending.rating ~= saved_rating then
+                UIManager:scheduleIn(0, function()
+                    self:syncBookshelfRating(
+                        asin,
+                        pending.rating,
+                        pending.trigger,
+                        pending.completion
+                    )
+                end)
+                return
+            end
+        end
+
+        -- rateBook has fully reaped the native process before invoking this
+        -- callback. Queueing completion only now prevents a concurrent KAF
+        -- shelf publish from swallowing a rapid rating update.
+        self:syncSummaryCompletion(
+            pending and pending.completion or completion)
+    end, trigger)
+
+    if not queued then
+        self.bookshelf_rating_inflight[asin] = nil
+        UIManager:show(InfoMessage:new({
+            text = string.format(
+                _("Could not start the KOReader rating sync: %s"),
+                detail or _("unknown error")
+            ),
+            timeout = 5,
+        }))
+        self:syncSummaryCompletion(completion)
+        return false, detail
+    end
+    return true, detail
+end
+
+--- Reconcile a successfully persisted KOReader summary. Reviews are
+--- intentionally ignored: only explicit Finished status and star changes are
+--- eligible for the Kindle's native Goodreads services.
+function Goodreads:onBookshelfSummarySaved(doc_settings, summary, trigger)
+    trigger = trigger == "book_status" and "book_status" or "bookshelf"
+    if type(doc_settings) ~= "table" or type(summary) ~= "table"
+        or type(doc_settings.readSetting) ~= "function"
+    then
+        return false, "invalid Bookshelf summary"
+    end
+
+    local path = doc_settings:readSetting("doc_path")
+    if type(path) ~= "string" or path == "" then
+        return false, "Bookshelf summary has no document path"
+    end
+    local bookshelf_reader = {
+        document = { file = path },
+        doc_settings = doc_settings,
+    }
+    local asin, resolver = getBookAsin(bookshelf_reader)
+    if not isAsin(asin) then
+        self:debugLog("bookshelf_summary_skipped", {
+            trigger = trigger,
+            resolver = resolver or "unknown",
+            status = "missing_asin",
+        })
+        return false, "book has no syncable ASIN"
+    end
+
+    if summary.status ~= "complete" then
+        self:debugLog("bookshelf_summary_skipped", {
+            trigger = trigger,
+            asin = asin,
+            resolver = resolver or "unknown",
+            status = "not_complete",
+        })
+        return true, "unfinished Bookshelf summary ignored"
+    end
+
+    local percent = select(1, getBookState(bookshelf_reader)) or 0
+    self.settings.last_completed_asin = asin
+    self:saveSettings()
+    local completion = {
+        asin = asin,
+        percent = percent,
+        trigger = trigger .. "_summary",
+        resolver = resolver,
+    }
+
+    local rating = normalizeRating(summary.rating, false)
+    if rating ~= nil then
+        return self:syncBookshelfRating(asin, rating, trigger, completion)
+    end
+
+    if self.settings.ratings[asin] ~= nil
+        or self.bookshelf_rating_inflight[asin] ~= nil
+    then
+        return self:syncBookshelfRating(asin, 0, trigger, completion)
+    end
+
+    self:syncSummaryCompletion(completion)
+    self:maybePromptForRating(asin)
+    return true, "completion observed"
+end
+
+--- Observe the same save function used by KOReader's long-press Book info,
+--- status buttons, and review editor. The wrapper always calls KOReader first
+--- and cannot make a failed local save look successful.
+function Goodreads:applyBookshelfSummaryHook()
+    local ok, filemanagerutil = pcall(
+        require, "apps/filemanager/filemanagerutil")
+    if not ok or not filemanagerutil
+        or type(filemanagerutil.saveSummary) ~= "function"
+    then
+        logger.warn("GoodreadsNative: Bookshelf summary save is unavailable")
+        return
+    end
+
+    -- Keep the file-manager-scoped instance. Reader-scoped instances are
+    -- short-lived and must not replace the object that owns Bookshelf dialogs.
+    if self.ui and not self.ui.document then
+        filemanagerutil._goodreads_native_plugin = self
+    end
+    if filemanagerutil._goodreads_native_summary_installed then
+        return
+    end
+
+    local original_save_summary = filemanagerutil.saveSummary
+    filemanagerutil.saveSummary = function(doc_settings_or_file, summary, ...)
+        local saved_settings = original_save_summary(
+            doc_settings_or_file, summary, ...)
+        local active_plugin = filemanagerutil._goodreads_native_plugin
+        if active_plugin and saved_settings then
+            local reconciled, reconcile_detail = pcall(
+                active_plugin.onBookshelfSummarySaved,
+                active_plugin,
+                saved_settings,
+                summary,
+                "bookshelf"
+            )
+            if not reconciled then
+                logger.warn(
+                    "GoodreadsNative: Bookshelf summary hook failed",
+                    reconcile_detail
+                )
+            end
+        end
+        return saved_settings
+    end
+    filemanagerutil._goodreads_native_summary_installed = true
+    logger.info("GoodreadsNative: Bookshelf summary hook installed")
+end
+
+--- KOReader's in-reader Book status widget does not use
+--- filemanagerutil.saveSummary: it mutates ReaderUI.doc_settings directly and
+--- flushes on close. Snapshot its initial status/rating after construction,
+--- let KOReader persist first, then reconcile only a real net change. This
+--- avoids treating the widget's initial star rendering as a user edit.
+function Goodreads:applyBookStatusHook()
+    local ok, BookStatusWidget = pcall(require, "ui/widget/bookstatuswidget")
+    if not ok or not BookStatusWidget
+        or type(BookStatusWidget.init) ~= "function"
+        or type(BookStatusWidget.onClose) ~= "function"
+    then
+        logger.warn("GoodreadsNative: Reader Book status widget is unavailable")
+        return
+    end
+    if BookStatusWidget._goodreads_native_summary_installed then
+        return
+    end
+
+    local original_init = BookStatusWidget.init
+    local original_on_close = BookStatusWidget.onClose
+
+    BookStatusWidget.init = function(widget, ...)
+        local result = original_init(widget, ...)
+        local summary = type(widget.summary) == "table" and widget.summary or {}
+        widget._goodreads_native_initial_status = summary.status
+        widget._goodreads_native_initial_rating =
+            normalizeRating(summary.rating, false) or 0
+        return result
+    end
+
+    BookStatusWidget.onClose = function(widget, ...)
+        local summary = type(widget.summary) == "table" and widget.summary or nil
+        local current_rating = summary
+            and (normalizeRating(summary.rating, false) or 0) or 0
+        local summary_changed = summary ~= nil
+            and (summary.status ~= widget._goodreads_native_initial_status
+                or current_rating ~= widget._goodreads_native_initial_rating)
+        local reader = widget.ui
+        local doc_settings = reader and reader.doc_settings
+        local active_plugin = reader and reader.goodreads_native
+
+        -- If KOReader's flush raises, control never reaches the observer.
+        local result = original_on_close(widget, ...)
+        if summary_changed and active_plugin and doc_settings then
+            local reconciled, reconcile_detail = pcall(
+                active_plugin.onBookshelfSummarySaved,
+                active_plugin,
+                doc_settings,
+                summary,
+                "book_status"
+            )
+            if not reconciled then
+                logger.warn(
+                    "GoodreadsNative: Reader Book status hook failed",
+                    reconcile_detail
+                )
+            end
+        end
+        return result
+    end
+
+    BookStatusWidget._goodreads_native_summary_installed = true
+    logger.info("GoodreadsNative: Reader Book status hook installed")
 end
 
 function Goodreads:applyReaderHook()
@@ -3946,22 +4257,24 @@ function Goodreads:applyAnnotationNoteHook()
     logger.info("GoodreadsNative: ReaderBookmark note-save hook installed")
 end
 
-function Goodreads:rateBook(asin, rating, on_complete)
+function Goodreads:rateBook(asin, rating, on_complete, trigger)
     if not isAsin(asin) then
         return false, "not an Amazon ASIN"
     end
 
-    rating = tonumber(rating)
-    if not rating or rating ~= math.floor(rating) or rating < 0 or rating > 5 then
+    rating = normalizeRating(rating, true)
+    if rating == nil then
         return false, "rating must be a whole number from 0 to 5"
     end
+
+    trigger = trigger or "manual_choice"
 
     local request_id = string.format("%d%d%d", os.time(), rating, math.random(1000, 9999))
     local result_file = string.format("%s-%s.log", RATING_RESULT_PREFIX, request_id)
     os.remove(result_file)
     os.execute("(" .. makeRatingCommand(asin, rating, request_id) .. ") >/dev/null 2>&1 &")
     self:debugLog("rating_queued", {
-        trigger = "manual_choice",
+        trigger = trigger,
         asin = asin,
         rating = rating,
         status = "queued",
@@ -3997,7 +4310,7 @@ function Goodreads:rateBook(asin, rating, on_complete)
                     self:syncAsin(asin, ACTION_READ, 1, false, "rating")
                 end
                 self:debugLog("rating_result", {
-                    trigger = "manual_choice",
+                    trigger = trigger,
                     asin = asin,
                     rating = rating,
                     status = "accepted",
@@ -4012,7 +4325,7 @@ function Goodreads:rateBook(asin, rating, on_complete)
                     and "native Goodreads service timed out"
                     or "native Goodreads service rejected the rating"
                 self:debugLog("rating_result", {
-                    trigger = "manual_choice",
+                    trigger = trigger,
                     asin = asin,
                     rating = rating,
                     status = fields.native_exit == "143" and "timed_out" or "rejected",
@@ -4030,7 +4343,7 @@ function Goodreads:rateBook(asin, rating, on_complete)
             UIManager:scheduleIn(0.5, pollResult)
         else
             self:debugLog("rating_result", {
-                trigger = "manual_choice",
+                trigger = trigger,
                 asin = asin,
                 rating = rating,
                 status = "no_result_within_35_seconds",

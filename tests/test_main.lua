@@ -99,6 +99,36 @@ package.preload["apps/reader/modules/readerbookmark"] = function()
     }
 end
 
+local FileManagerUtil = {
+    saveSummary = function(doc_settings, summary)
+        doc_settings:saveSetting("summary", summary)
+        doc_settings:flush()
+        return doc_settings
+    end,
+}
+package.preload["apps/filemanager/filemanagerutil"] = function()
+    return FileManagerUtil
+end
+
+TestBookStatusWidget = {
+    init = function(widget)
+        widget.summary = widget.ui.doc_settings:readSetting("summary")
+        -- KOReader's initial star rendering marks this widget updated even
+        -- when the user has not changed the rating.
+        widget.updated = true
+        return "status-initialized"
+    end,
+    onClose = function(widget)
+        if widget.updated then
+            widget.ui.doc_settings:flush()
+        end
+        return "status-closed"
+    end,
+}
+package.preload["ui/widget/bookstatuswidget"] = function()
+    return TestBookStatusWidget
+end
+
 local saved_settings
 G_reader_settings = {
     readSetting = function()
@@ -122,6 +152,8 @@ local function newPlugin(settings)
         progress_timer_scheduled = false,
         progress_timer_generation = 0,
         rating_prompt_scheduled = {},
+        bookshelf_rating_inflight = {},
+        bookshelf_rating_pending = {},
         annotation_retry_counts = {},
         annotation_request_ids = {},
         annotation_snapshot_tokens = {},
@@ -261,6 +293,280 @@ assert(commands[1] and commands[1]:match("goodread_read"),
 assert(completion_plugin.reading_history.books.B0FLB24198.sessions[1].outcome
         == "completed",
     "explicit completion must finish the local lifecycle")
+
+-- KOReader's long-press Book info and status controls persist Finished and
+-- star choices through filemanagerutil.saveSummary. The plugin must observe
+-- that successful save, resolve the converted book's ASIN, and transport the
+-- explicit choice exactly once. Unfinished and non-ASIN books remain local.
+do
+local bookshelf_plugin = newPlugin(settings({
+    enabled = true,
+    rating_prompt_enabled = true,
+}))
+bookshelf_plugin.ui = { document = nil }
+local bookshelf_checkpoints = {}
+local bookshelf_ratings = {}
+local bookshelf_prompts = {}
+bookshelf_plugin.syncCapturedCheckpoint = function(
+    _, asin, percent, status, trigger, resolver
+)
+    table.insert(bookshelf_checkpoints, {
+        asin = asin,
+        percent = percent,
+        status = status,
+        trigger = trigger,
+        resolver = resolver,
+    })
+    return true, "checkpoint processed"
+end
+bookshelf_plugin.syncBookshelfRating = function(
+    _, asin, rating, trigger, completion
+)
+    table.insert(bookshelf_ratings, {
+        asin = asin,
+        rating = rating,
+        trigger = trigger,
+        completion = completion,
+    })
+    return true, "queued"
+end
+bookshelf_plugin.maybePromptForRating = function(_, asin)
+    table.insert(bookshelf_prompts, asin)
+end
+bookshelf_plugin:applyBookshelfSummaryHook()
+
+local bookshelf_summary
+local bookshelf_doc_settings = {
+    data = {
+        doc_path = "KINDLE_VIRTUAL://B0FLB24198/book.epub",
+        percent_finished = 1,
+    },
+    readSetting = function(self, key)
+        return self.data[key]
+    end,
+    saveSetting = function(self, key, value)
+        self.data[key] = value
+    end,
+    flush = function() return true end,
+}
+bookshelf_summary = { status = "complete", rating = 4 }
+assert(FileManagerUtil.saveSummary(bookshelf_doc_settings, bookshelf_summary)
+        == bookshelf_doc_settings,
+    "the Bookshelf hook must preserve KOReader's save return value")
+assert(#bookshelf_checkpoints == 0,
+    "a Bookshelf completion checkpoint must wait behind its rating")
+assert(#bookshelf_ratings == 1
+        and bookshelf_ratings[1].asin == "B0FLB24198"
+        and bookshelf_ratings[1].rating == 4
+        and bookshelf_ratings[1].trigger == "bookshelf"
+        and bookshelf_ratings[1].completion.asin == "B0FLB24198"
+        and bookshelf_ratings[1].completion.percent == 1
+        and bookshelf_ratings[1].completion.trigger == "bookshelf_summary",
+    "Bookshelf stars must carry the deferred completion checkpoint")
+assert(#bookshelf_prompts == 0,
+    "an existing Bookshelf rating must suppress the completion chooser")
+assert(bookshelf_plugin.settings.last_completed_asin == "B0FLB24198",
+    "Bookshelf completion must enable the last-completed rating action")
+
+bookshelf_summary = { status = "complete" }
+bookshelf_plugin.settings.ratings.B0FLB24198 = 4
+FileManagerUtil.saveSummary(bookshelf_doc_settings, bookshelf_summary)
+assert(#bookshelf_ratings == 2 and bookshelf_ratings[2].rating == 0,
+    "removing saved stars from a completed book must clear Goodreads")
+
+bookshelf_plugin.settings.ratings.B0FLB24198 = nil
+FileManagerUtil.saveSummary(bookshelf_doc_settings, bookshelf_summary)
+assert(#bookshelf_prompts == 1
+        and bookshelf_prompts[1] == "B0FLB24198"
+        and #bookshelf_checkpoints == 1
+        and bookshelf_checkpoints[1].trigger == "bookshelf_summary",
+    "completion without stars must activate the rating chooser")
+
+bookshelf_summary = { status = "reading", rating = 5 }
+FileManagerUtil.saveSummary(bookshelf_doc_settings, bookshelf_summary)
+assert(#bookshelf_ratings == 2 and #bookshelf_prompts == 1,
+    "rating an unfinished Bookshelf book must not silently mark it Read")
+
+local local_doc_settings = {
+    data = { doc_path = "/mnt/us/documents/local-book.epub" },
+    readSetting = function(self, key) return self.data[key] end,
+    saveSetting = function(self, key, value) self.data[key] = value end,
+    flush = function() return true end,
+}
+FileManagerUtil.saveSummary(
+    local_doc_settings, { status = "complete", rating = 5 })
+assert(#bookshelf_checkpoints == 1 and #bookshelf_ratings == 2,
+    "a local book without a Kindle ASIN must remain local")
+
+-- Reader menu -> Book status uses a different persistence path: it mutates
+-- ReaderUI.doc_settings and flushes from BookStatusWidget:onClose. Opening and
+-- closing the widget is not an edit even though KOReader's initial star render
+-- sets `updated`; real status/rating changes must run only after that flush.
+local function testBookStatusHook()
+bookshelf_plugin:applyBookStatusHook()
+local reader_summary = { status = "complete", rating = 4 }
+local reader_flushes = 0
+local reader_status_doc_settings = {
+    data = {
+        doc_path = "KINDLE_VIRTUAL://B0FLB24198/book.epub",
+        percent_finished = 1,
+        summary = reader_summary,
+    },
+    readSetting = function(self, key) return self.data[key] end,
+    flush = function()
+        reader_flushes = reader_flushes + 1
+        return true
+    end,
+}
+local function openStatusWidget()
+    local widget = {
+        ui = {
+            doc_settings = reader_status_doc_settings,
+            goodreads_native = bookshelf_plugin,
+        },
+    }
+    assert(TestBookStatusWidget.init(widget) == "status-initialized",
+        "the Book status hook must preserve KOReader's init return value")
+    return widget
+end
+
+bookshelf_plugin.settings.ratings.B0FLB24198 = 4
+local checkpoints_before_status = #bookshelf_checkpoints
+local ratings_before_status = #bookshelf_ratings
+local unchanged_widget = openStatusWidget()
+assert(TestBookStatusWidget.onClose(unchanged_widget) == "status-closed",
+    "the Book status hook must preserve KOReader's close return value")
+assert(reader_flushes == 1
+        and #bookshelf_checkpoints == checkpoints_before_status
+        and #bookshelf_ratings == ratings_before_status,
+    "opening Book status must not resubmit its initially rendered rating")
+
+local five_star_widget = openStatusWidget()
+reader_summary.rating = 5
+TestBookStatusWidget.onClose(five_star_widget)
+assert(reader_flushes == 2
+        and #bookshelf_checkpoints == checkpoints_before_status
+        and #bookshelf_ratings == ratings_before_status + 1
+        and bookshelf_ratings[#bookshelf_ratings].rating == 5
+        and bookshelf_ratings[#bookshelf_ratings].trigger == "book_status"
+        and bookshelf_ratings[#bookshelf_ratings].completion.trigger
+            == "book_status_summary",
+    "an in-reader star edit must defer its Read checkpoint behind the rating")
+
+bookshelf_plugin.settings.ratings.B0FLB24198 = 5
+local clear_widget = openStatusWidget()
+reader_summary.rating = nil
+TestBookStatusWidget.onClose(clear_widget)
+assert(reader_flushes == 3
+        and bookshelf_ratings[#bookshelf_ratings].rating == 0
+        and bookshelf_ratings[#bookshelf_ratings].trigger == "book_status",
+    "clearing in-reader stars must clear the native Goodreads rating")
+
+bookshelf_plugin.settings.ratings.B0FLB24198 = nil
+reader_summary.status = "reading"
+local completion_widget = openStatusWidget()
+reader_summary.status = "complete"
+local prompts_before_status = #bookshelf_prompts
+TestBookStatusWidget.onClose(completion_widget)
+assert(reader_flushes == 4
+        and #bookshelf_prompts == prompts_before_status + 1
+        and #bookshelf_checkpoints == checkpoints_before_status + 1
+        and bookshelf_checkpoints[#bookshelf_checkpoints].trigger
+            == "book_status_summary",
+    "marking Finished in Book status must activate the rating chooser")
+
+reader_summary.rating = 4
+bookshelf_plugin.settings.ratings.B0FLB24198 = 4
+local review_only_widget = openStatusWidget()
+reader_summary.note = "local-only review"
+TestBookStatusWidget.onClose(review_only_widget)
+assert(reader_flushes == 5
+        and #bookshelf_ratings == ratings_before_status + 2,
+    "editing only the local review must never submit a rating")
+end
+testBookStatusHook()
+
+-- Rapid rating edits are serialized. Only the active request and newest
+-- pending choice survive; repeated values and repeated clears are deduped.
+local rating_plugin = newPlugin(settings({ enabled = false }))
+local native_rating_requests = {}
+rating_plugin.test_checkpoints = {}
+rating_plugin.syncCapturedCheckpoint = function(
+    self, asin, percent, status, trigger, resolver
+)
+    table.insert(self.test_checkpoints, {
+        asin = asin,
+        percent = percent,
+        status = status,
+        trigger = trigger,
+        resolver = resolver,
+    })
+    return true, "checkpoint processed"
+end
+rating_plugin.rateBook = function(self, asin, rating, callback, trigger)
+    table.insert(native_rating_requests, {
+        asin = asin,
+        rating = rating,
+        callback = callback,
+        trigger = trigger,
+    })
+    return true, "queued"
+end
+assert(rating_plugin:syncBookshelfRating(
+    "B0FLB24198", 3, "bookshelf", {
+        asin = "B0FLB24198",
+        percent = 1,
+        trigger = "bookshelf_summary",
+        resolver = "kindle_library",
+    }))
+assert(rating_plugin:syncBookshelfRating(
+    "B0FLB24198", 4, "book_status", {
+        asin = "B0FLB24198",
+        percent = 1,
+        trigger = "book_status_summary",
+        resolver = "kindle_library",
+    }))
+assert(rating_plugin:syncBookshelfRating(
+    "B0FLB24198", 4, "book_status", {
+        asin = "B0FLB24198",
+        percent = 1,
+        trigger = "book_status_summary",
+        resolver = "kindle_library",
+    }))
+assert(#native_rating_requests == 1
+        and native_rating_requests[1].rating == 3
+        and native_rating_requests[1].trigger == "bookshelf",
+    "rapid edits must not launch parallel native rating requests")
+assert(#rating_plugin.test_checkpoints == 0,
+    "completion must wait while the native rating lane is active")
+rating_plugin.settings.ratings.B0FLB24198 = 3
+local scheduled_before_rating_replay = #scheduled
+native_rating_requests[1].callback(true, "sent")
+assert(#scheduled == scheduled_before_rating_replay + 1,
+    "the newest coalesced rating must be scheduled after the active request")
+scheduled[#scheduled]()
+assert(#native_rating_requests == 2
+        and native_rating_requests[2].rating == 4,
+    "only the newest coalesced rating must replay")
+rating_plugin.settings.ratings.B0FLB24198 = 4
+native_rating_requests[2].callback(true, "sent")
+assert(#rating_plugin.test_checkpoints == 1
+        and rating_plugin.test_checkpoints[1].trigger
+            == "book_status_summary",
+    "the latest completion must run after the rating lane drains")
+assert(rating_plugin:syncBookshelfRating("B0FLB24198", 4))
+assert(#native_rating_requests == 2,
+    "an unchanged Bookshelf rating must not be submitted twice")
+assert(rating_plugin:syncBookshelfRating("B0FLB24198", 0))
+assert(#native_rating_requests == 3
+        and native_rating_requests[3].rating == 0,
+    "an explicit star removal must submit native rating zero")
+rating_plugin.settings.ratings.B0FLB24198 = nil
+native_rating_requests[3].callback(true, "sent")
+assert(rating_plugin:syncBookshelfRating("B0FLB24198", 0))
+assert(#native_rating_requests == 3,
+    "an already-cleared rating must not be submitted twice")
+end
 
 -- Explicit shelf choices use all three actions exposed by this firmware's
 -- native KAF handler. A manual action succeeds only when its response reports

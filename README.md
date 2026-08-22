@@ -31,8 +31,11 @@ account token is required or stored.
   even when reverse translation spells an EPUB endpoint one character
   differently, so a native echo cannot create a duplicate.
 - Offers configurable 2, 5, 10, or 15 minute periodic checkpoints.
-- Offers a one-time 1–5 star chooser when a book is completed.
-- Supports manual rating updates and clearing an existing rating.
+- Offers a one-time 1–5 star chooser when a book is completed in the reader
+  or through KOReader's Bookshelf.
+- Synchronizes explicit star choices, changes, and clears from **Reader menu →
+  Book status** for completed ASIN-backed books, in addition to the manual
+  rating actions.
 - Suppresses duplicate percentage updates per ASIN.
 - Collapses only exact duplicate highlight ranges while preserving an attached
   note. Nearby selections that share Kindle's coarse locations remain separate
@@ -146,13 +149,34 @@ On close, the live position is captured before KOReader unloads the document.
 The delayed shell work survives a full KOReader exit and lets other close hooks
 finish their native content-database writes first.
 
-When KOReader explicitly marks the document complete, it displays a one-time
-rating chooser after returning to the file browser. The chosen 1–5 star value
-is submitted through the Kindle's native `rateABook` service. Rating `0` is
-exposed as **Clear rating**. A manual Read shelf choice records local
-completion and enables **Rate last completed book…**; a percentage, including
-99%, never implies completion or a rating. The plugin never guesses a rating
-from reading behavior.
+When KOReader explicitly marks the document complete—either while closing the
+reader or through the long-press Bookshelf status controls—the plugin records
+the Read shelf and displays a one-time rating chooser after returning to the
+file browser. If you instead choose 1–5 stars in **Reader menu → Book status**
+and close that screen with **×**, the persisted choice is submitted
+automatically through the Kindle's native `rateABook` service and the extra
+chooser is suppressed. Changing the saved stars updates Goodreads; clearing
+previously synchronized stars sends native rating `0`.
+
+At the last page, advance once more to open KOReader's end-of-document dialog,
+choose **Book status**, leave the status as **Finished**, select the desired
+stars, and close with **×**. The local sidecar is flushed first; native rating
+sync starts only after that successful close. You can use **Goodreads (native
+Kindle sync) → Rate current book…** at any time instead.
+
+Rapid star changes are serialized, with only the newest pending choice retained,
+and an unchanged rating is not submitted twice. A completion shelf write waits
+until the native rating request has finished, so the two Kindle services cannot
+overwrite one another. Automatic Book status rating sync is limited to books
+whose KOReader status is **Finished**. Rating an unfinished book remains local
+so the plugin cannot silently mark it Read.
+KOReader review text also remains local and is never submitted by this
+integration.
+
+A manual Read shelf choice records local completion and enables **Rate last
+completed book…**; a percentage, including 99%, never implies completion or a
+rating. The plugin never guesses a rating from reading behavior. Rating `0` is
+also exposed as **Clear rating** in the plugin's manual rating dialog.
 
 You can also use **Rate current book…** while reading or **Rate last completed
 book…** from the file browser.
@@ -517,8 +541,13 @@ Common failure points:
 The native Kindle Goodreads UI should work with the same account before this
 plugin is expected to work.
 
-Rating failures are shown immediately in KOReader. A successful rating is also
-remembered locally so the completion prompt is not repeated for the same ASIN.
+Rating failures are shown immediately in KOReader. A successful manual or Book
+status rating is remembered locally so the completion prompt is not repeated
+for the same ASIN. If Goodreads has no rating after closing **Book status**,
+confirm that the KOReader book is marked **Finished** and has a mapped Kindle
+ASIN, then inspect **Show sync diagnostics**. Native acceptance is asynchronous:
+the Goodreads website can lag the Kindle by several minutes, so refresh it
+before retrying the same rating.
 
 ## Build and verify
 
@@ -552,6 +581,8 @@ framework logs in public issues.
 - Goodreads receives integer percentages, matching Amazon's native request.
 - Goodreads ratings are whole stars from 1–5; half-star ratings are not
   supported by the native service.
+- KOReader's free-form book review remains local; only explicit whole-star
+  ratings on completed ASIN-backed books are synchronized automatically.
 - Native shelf selection is limited to Want to Read, Currently Reading, and
   Read. Custom shelves and DNF are not exposed by this firmware bridge.
 - Start/finish dates, reread sessions, DNF, streaks, goals, and history exports

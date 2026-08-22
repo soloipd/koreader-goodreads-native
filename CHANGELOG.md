@@ -3,6 +3,34 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.11.3] - 2026-08-22
+
+### Fixed
+
+- KOReader Bookshelf summary saves are now observed after the local sidecar is
+  successfully flushed. Marking an ASIN-backed book Finished from the
+  long-press status controls publishes the Read state and activates the same
+  one-time rating chooser used by reader completion.
+- The independent in-reader **Book status** persistence path is also observed
+  after its `doc_settings` flush. Explicit star choices, changes, and clears on
+  completed books now use Kindle's native `rateABook` service. Merely opening
+  and closing the screen is ignored despite KOReader's initial star render.
+- Unfinished and non-ASIN books remain local, and KOReader's free-form review
+  text is never submitted.
+- Rapid star edits are serialized per ASIN. The newest pending choice replaces
+  stale work, while unchanged ratings and repeated clears are deduplicated.
+- Completion shelf writes now wait for the native rating lane to drain. A star
+  edit can no longer race a simultaneous Read publish and be acknowledged by
+  the Kindle locally while Goodreads retains the previous rating.
+
+### Tests
+
+- Added deterministic coverage for Bookshelf completion, in-reader Book status
+  creation/update/clear, prompt activation, initial-render and review-only
+  isolation, rapid-edit coalescing, unchanged-value dedupe, unfinished-book and
+  non-ASIN isolation, deferred completion ordering, and preservation of
+  KOReader's save return values.
+
 ## [0.11.2] - 2026-08-18
 
 ### Fixed
