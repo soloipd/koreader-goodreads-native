@@ -52,6 +52,31 @@ account token is required or stored.
 - Uses only the Kindle's native authenticated services.
 - Never displays the native Goodreads sharing dialog.
 
+## Optional AI reading recap and Quiet header
+
+This repository also includes [Quiet reading companion](readingcompanion.koplugin/README.md),
+a separate, optional plugin that uses your configured KOAssistant provider/model
+to write a recap in its own words—not a list of excerpts. It summarizes the text
+from the beginning of a flowing book up to, but not including, your current
+KOReader reading position. Longer text is summarized in chronological chunks
+and combined into one recap, with more attention to recent reading.
+
+The companion supplies no unread remainder, web search, or whole-book lookup.
+It checks supporting source references before displaying the completed prose;
+those checks establish provenance, not a guarantee against AI mistakes or spoilers
+inferred by the model. Earlier text you skipped can still be included.
+
+Tap **Recap** in its Quiet header or enable automatic recap on book open.
+The header also shows time, the current chapter heading, battery percentage,
+and charging status. Exact-position cached recaps work offline; fresh generation
+sends the bounded text to your AI provider and incurs its normal charges.
+
+Install `readingcompanion.koplugin` separately alongside an enabled, configured
+KOAssistant, then restart KOReader. It is not part of the Goodreads release ZIP
+and does not change Goodreads, Kindle progress, or annotation synchronization.
+See its [setup, safeguards, and limitations](readingcompanion.koplugin/README.md)
+and [device acceptance results](readingcompanion-tests/ACCEPTANCE-v2.md).
+
 ## Requirements
 
 - A jailbroken Kindle with KOReader.
