@@ -31,3 +31,7 @@ M.run(a,function(_,_,cb) attempts=attempts+1;cb(true,"json") end,function()
  if attempts==1 then return {} end;return decode()
 end,function() return true end,function(ok,text) assert(ok and text) end)
 assert(attempts==2);print("PASS corrected answer returns prose after evidence validation")
+attempts=0
+M.run(a,function(_,_,cb) attempts=attempts+1;cb(true,"json") end,decode,function() return true end,
+function(ok,text,err) assert(not ok and not text and err:find("two paragraphs",1,true)) end,{length="standard"})
+assert(attempts==2);print("PASS wrong paragraph count retries once then fails closed")

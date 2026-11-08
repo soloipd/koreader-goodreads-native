@@ -3,7 +3,7 @@ local M = {}
 
 -- Serial bounded requests: never send unread text and never run requests in
 -- parallel on the Kindle. Final synthesis only sees source-grounded chunk notes.
-function M.run(source, ask, decode, alive, done)
+function M.run(source, ask, decode, alive, done, options)
     local chunks = P.chunks(source)
     if not chunks then done(false, nil, "Cannot safely split source text"); return end
     local notes, index, final_evidence, evidence_count = {}, 1, {}, 0
@@ -13,7 +13,7 @@ function M.run(source, ask, decode, alive, done)
         if ok then return P.verify(result, scope, evidence_map) end
         return nil,nil,"invalid JSON"
     end
-    local function request(prompt, input, scope, callback, evidence_map)
+    local function request(prompt, input, scope, callback, evidence_map, final)
         if not alive() then done(false, nil, "Reading position changed"); return end
         if not evidence_map then
             local numbered
@@ -27,6 +27,10 @@ function M.run(source, ask, decode, alive, done)
             if not alive() then done(false, nil, "Reading position changed"); return end
             if not ok or type(response) ~= "string" then done(false,nil,err or "Request failed"); return end
             local text, paragraphs, reason = parse(response,scope,evidence_map)
+            if text and final and not P.checkLength(paragraphs, options) then
+                reason = "expected two paragraphs within the selected length limit; got " .. #paragraphs .. " paragraphs and " .. P.wordCount(text) .. " words"
+                text = nil
+            end
             if not text then
                 if not corrected then
                     corrected = true
@@ -40,7 +44,7 @@ function M.run(source, ask, decode, alive, done)
         ask(prompt, input, receive)
     end
     if #chunks == 1 then
-        request(P.prompt, "READ TEXT (exclusive position cutoff):", source, function(text) done(true,text) end)
+        request(P.outputPrompt(options), "READ TEXT (exclusive position cutoff):", source, function(text) done(true,text) end, nil, true)
         return
     end
     local nextChunk
@@ -63,8 +67,8 @@ function M.run(source, ask, decode, alive, done)
                     nextChunk()
                 end)
         else
-            request(P.prompt .. "\nSynthesize the chronological working notes into ONE coherent recap of everything read so far. Cite the F-prefixed original source IDs below. Do not mention the chunking process.",
-                table.concat(notes,"\n"), source, function(text) done(true,text) end, final_evidence)
+            request(P.outputPrompt(options) .. "\nSynthesize the chronological working notes into ONE coherent recap of the selected scope. Cite the F-prefixed original source IDs below. Do not mention the chunking process.",
+                table.concat(notes,"\n"), source, function(text) done(true,text) end, final_evidence, true)
         end
     end
     nextChunk()

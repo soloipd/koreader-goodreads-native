@@ -56,10 +56,12 @@ account token is required or stored.
 
 This repository also includes [Quiet reading companion](readingcompanion.koplugin/README.md),
 a separate, optional plugin that uses your configured KOAssistant provider/model
-to write a recap in its own words—not a list of excerpts. It summarizes the text
-from the beginning of a flowing book up to, but not including, your current
-KOReader reading position. Longer text is summarized in chronological chunks
-and combined into one recap, with more attention to recent reading.
+to write a recap in its own words—not a list of excerpts. By default it gives
+two short paragraphs (target 100–150 words) about the current chapter up to your
+KOReader position. At a new chapter's start it recalls the previous chapter;
+during the first 500 words it connects that chapter to the already-read opening.
+Scope and length are configurable, including recent-text and whole-prefix modes.
+Longer selected text is summarized in chronological chunks and combined into one recap.
 
 The companion supplies no unread remainder, web search, or whole-book lookup.
 It checks supporting source references before displaying the completed prose;
@@ -75,7 +77,7 @@ Install `readingcompanion.koplugin` separately alongside an enabled, configured
 KOAssistant, then restart KOReader. It is not part of the Goodreads release ZIP
 and does not change Goodreads, Kindle progress, or annotation synchronization.
 See its [setup, safeguards, and limitations](readingcompanion.koplugin/README.md)
-and [device acceptance results](readingcompanion-tests/ACCEPTANCE-v2.md).
+and [device acceptance results](readingcompanion-tests/ACCEPTANCE-v3.md).
 
 ## Requirements
 

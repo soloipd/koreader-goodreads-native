@@ -1,5 +1,8 @@
 package.path = "readingcompanion.koplugin/?.lua;" .. package.path
 local scheduled, shown = {}, 0
+local preferences = {}
+G_reader_settings={readSetting=function(_,k,default) return preferences[k] or default end,
+saveSetting=function(_,k,v) preferences[k]=v end}
 package.loaded.logger={info=function() end,warn=function() end}
 local U = {scheduleIn=function(_,_,f) scheduled[f]=true end,unschedule=function(_,f) scheduled[f]=nil end,
  nextTick=function(_,f) scheduled[f]=true end,show=function() shown=shown+1 end,close=function() end}
@@ -17,8 +20,10 @@ end}
 local callback, config, messages
 package.loaded["koassistant.request.gpt_query"]={query=function(m,c,cb) messages=m;config=c;callback=cb end}
 local past="Mara repaired the old clock in the workshop. The clock began keeping time after she replaced its spring."
-package.loaded.json={decode=function() return {paragraphs={{text="Mara has restored the old clock to working order by replacing its spring.",evidence={"S0001"}}}} end}
-local C=dofile("readingcompanion.koplugin/main.lua")
+package.loaded.json={decode=function() return {paragraphs={
+{text=string.rep("Mara repaired the old clock with a replacement spring. ",5),evidence={"S0001"}},
+{text=string.rep("The workshop clock now keeps accurate time after repair. ",5),evidence={"S0001"}}}} end}
+local C=dofile((os.getenv("READINGCOMPANION_PLUGIN_DIR") or "readingcompanion.koplugin") .. "/main.lua")
 local n=0
 local function check(v,name) assert(v,name);n=n+1;print("PASS "..name) end
 local function instance()
@@ -57,4 +62,14 @@ s:showRecap(true);callback(true,"json")
 check(s.last_status=="generated_grounded","retry after completed timeout succeeds")
 s=instance();s:onReaderReady();check(s.ready_task and scheduled[s.ready_task],"header deferred until core restoration completes")
 s:onCloseDocument();check(not scheduled[s.ready_task],"close cancels deferred header installation")
+local menu={};s:addToMainMenu(menu)
+local items=menu.readingcompanion.sub_item_table
+check(items[2].sub_item_table[1].checked_func(),"chapter-aware menu default")
+items[2].sub_item_table[3].callback()
+check(s:recapOptions().scope=="all","scope menu saves selected option")
+items[3].sub_item_table[1].callback()
+check(s:recapOptions().length=="brief","length menu saves selected option")
+preferences={}
+s,data=instance();s:showRecap(true);preferences.readingcompanion_scope="all";callback(true,"json")
+check(not s.displayed and not data.readingcompanion_recap,"settings change while generating discards old result")
 print(n.." tests passed")

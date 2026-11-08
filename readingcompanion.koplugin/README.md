@@ -13,16 +13,28 @@ Tap the centre of the header, or use **Tools → Quiet reading companion → Sho
 ### What happens when you tap Recap
 
 1. Capture the book's current KOReader text position (XPointer), not its percentage or the native Kindle percentage.
-2. Extract only the text before that boundary, without turning pages or moving your position.
+2. Select the chapter-aware scope described below and extract only text before that boundary, without turning pages or moving your position.
 3. Reuse a matching local recap, or ask your configured KOAssistant model to summarize that bounded text. Longer inputs are processed sequentially, then combined into one coherent recap.
 4. Validate the returned structure and supporting source references, and recheck that you are still at the same book and position.
 5. Show the finished AI-written prose. Draft responses and intermediate chunk summaries are never streamed onto the screen. Choose **Continue reading** to return to the book.
 
-An uncached recap requires an internet connection and may take a minute or more: one observed three-chunk run took approximately 80 seconds. Reopening at the exact same position uses the cache without another AI request. The 150–220-word length is a prompt target, not a strict output limit.
+An uncached recap requires an internet connection and may take a minute or more for long scopes. Reopening at the exact same position with the same settings uses the cache without another AI request.
+
+### Defaults and configuration
+
+Open **Tools → Quiet reading companion → Recap scope / Recap length** (the Tools menu may group plugins under More tools).
+
+- **Chapter-aware (default):** mid-chapter, summarize only the current chapter up to your position, emphasizing recent developments. At the exact chapter start, use the previous chapter. During the first 500 whitespace-delimited words of the new chapter, include the previous chapter and only the already-read opening of the new one. At 500 words, the previous chapter drops out.
+- **Recent text:** use up to the last 2,500 whitespace-delimited words before your position.
+- **Everything read so far:** explicitly opt into the earlier whole-prefix behavior.
+
+All lengths use **exactly two paragraphs**. Standard, the default, targets **100–150 words**; Brief targets 60–90 and Detailed 180–250. Validation allows small variation (80–160, 40–100, and 150–270 respectively). Wrong paragraph counts or excessive length get one correction attempt, then no recap is displayed. Paragraph one restores the situation or argument; paragraph two covers recent developments without predicting what comes next.
+
+Chapter boundaries come from EPUB TOC XPointers, not screen pages or guessed chapter numbers. The current TOC entry's depth defines the chapter/section level; in nested TOCs this can mean a subsection, with the preceding same-depth entry used for transition context. Missing usable headings fall back to the recent-text window. Words are whitespace-delimited, so the threshold is approximate and less suitable for languages without word spaces. Unread TOC titles are not supplied to the model; headings inside the selected read text may be included. Settings are global and changing scope or length invalidates the cached recap.
 
 ### Input cutoff and validation
 
-Version 2 produces an **AI-written summary in its own words**, aiming for 150–220 words. It extracts the complete text from the beginning to the current EPUB XPointer, excluding the unread remainder of the current page. Extraction does not navigate the book. Text over 100,000 bytes is processed in chronological chunks, then synthesized into one recap. No earlier chapters are silently dropped. Above a 2,000,000-byte safety limit, generation fails closed rather than substituting a partial recap.
+Version 3 produces an **AI-written refresher in its own words**, scoped to the selected chapter-aware, recent-text, or whole-prefix mode. The current EPUB XPointer remains the exclusive upper boundary, excluding the unread remainder of the current page. Extraction does not navigate the book. Selected text over 100,000 bytes is processed in chronological chunks, then synthesized into one recap. Above a 2,000,000-byte extraction safety limit, generation fails closed; this also applies to the prefix extracted before trimming a recent-text fallback.
 
 The model must attach supporting source IDs to every summary paragraph. IDs resolve to numbered passages from the bounded source and are kept out of the displayed recap. Unknown IDs, references outside the source, or malformed results cause the run to fail, not a partial summary to appear. During synthesis, references resolve to original source passages, not merely earlier generated notes. Prompts forbid external knowledge, predictions, unread events, and using contents lists or future-chapter previews as narrative. No title, author, external full-book summary, later highlights, web results, or book-search tools are supplied. **Reference validation proves that cited passages occur in the source, not that every AI paraphrase is logically correct.** Hallucinations cannot be categorically ruled out. The cutoff also cannot distinguish text the reader skipped earlier.
 
@@ -48,6 +60,7 @@ From the parent workspace:
 luajit readingcompanion-tests/policy_spec.lua
 luajit readingcompanion-tests/lifecycle_spec.lua
 luajit readingcompanion-tests/summary_spec.lua
+luajit readingcompanion-tests/chapter_spec.lua
 ```
 
-Tests cover full-prefix exclusive boundaries, paraphrased output, invalid evidence rejection, old-cache migration, lossless bounded chunking, sequential synthesis, failed-chunk cancellation, wrong-book and rewind caches, offline behavior, stale responses, timeout recovery, and header initialization ordering. These are bounded acceptance tests, not a guarantee against every model, firmware, or third-party-plugin interaction. See the [version-2 device acceptance record](../readingcompanion-tests/ACCEPTANCE-v2.md) for the 52 passing checks and observed live AI recap.
+Tests cover chapter boundaries and transitions, scope/length settings, exclusive cutoffs, output-length enforcement, paraphrased output, invalid evidence rejection, old-cache migration, lossless bounded chunking, sequential synthesis, failed-chunk cancellation, wrong-book and rewind caches, offline behavior, stale responses, timeout recovery, and header initialization ordering. These are bounded acceptance tests, not a guarantee against every model, firmware, or third-party-plugin interaction. See the [version-3 device acceptance record](../readingcompanion-tests/ACCEPTANCE-v3.md) for the 73 passing checks and observed live chapter recap. The version-2 record is historical.

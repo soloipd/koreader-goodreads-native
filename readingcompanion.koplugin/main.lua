@@ -20,10 +20,28 @@ function Companion:init()
 end
 
 function Companion:addToMainMenu(menu)
+    local function choices(key, items)
+        local result = {}
+        for _, item in ipairs(items) do
+            local value, label = item[1], item[2]
+            result[#result+1] = { text = label, checked_func = function()
+                return self:recapOptions()[key] == value
+            end, callback = function()
+                G_reader_settings:saveSetting("readingcompanion_" .. key, value)
+            end }
+        end
+        return result
+    end
     menu.readingcompanion = {
         text = "Quiet reading companion",
         sub_item_table = {
             { text = "Show spoiler-safe recap", callback = function() self:showRecap(false) end },
+            { text = "Recap scope", sub_item_table = choices("scope", {
+                {"chapter","Chapter-aware (default)"}, {"recent","Recent text (~2,500 words)"},
+                {"all","Everything read so far"} }) },
+            { text = "Recap length", sub_item_table = choices("length", {
+                {"brief","Brief: 60–90 words"}, {"standard","Standard: 100–150 words (default)"},
+                {"detailed","Detailed: 180–250 words"} }) },
             { text = "Automatic recap on book open", checked_func = function()
                 return G_reader_settings:readSetting("readingcompanion_auto", true)
               end, callback = function()
@@ -31,6 +49,11 @@ function Companion:addToMainMenu(menu)
               end },
         },
     }
+end
+
+function Companion:recapOptions()
+    return Policy.options({scope=G_reader_settings:readSetting("readingcompanion_scope"),
+        length=G_reader_settings:readSetting("readingcompanion_length")})
 end
 
 function Companion:onReaderReady()
@@ -95,7 +118,7 @@ function Companion:display(text)
     if not self.alive then return end
     if self.viewer then UIManager:close(self.viewer) end
     self.viewer = TextViewer:new{
-        title = "Your AI recap · read so far",
+        title = "Your AI recap · where you left off",
         text = text,
         buttons_table = {{{ text = "Continue reading", callback = function()
             UIManager:close(self.viewer); self.viewer = nil
@@ -106,7 +129,8 @@ end
 
 function Companion:showRecap(automatic)
     if not self.alive or self.pending or busy then return end
-    local ok, ctx, reason = pcall(Policy.capture, self.ui.document)
+    local options = self:recapOptions()
+    local ok, ctx, reason = pcall(Policy.capture, self.ui.document, options)
     if not ok or not ctx then
         self.last_status = "no_safe_context"
         if not automatic then UIManager:show(InfoMessage:new{ text = reason or "Cannot safely extract earlier text.", timeout = 3 }) end
@@ -159,12 +183,12 @@ function Companion:showRecap(automatic)
             return
         end
         local text = response
-        local current_ok, current = pcall(Policy.capture, self.ui.document)
-        if not current_ok or not current or current.file ~= ctx.file or current.xp ~= ctx.xp or current.source ~= ctx.source then
+        local current_ok, current = pcall(Policy.capture, self.ui.document, self:recapOptions())
+        if not current_ok or not current or current.file ~= ctx.file or current.xp ~= ctx.xp or current.source ~= ctx.source or current.options_key ~= ctx.options_key then
             self.last_status = "stale_response_discarded"; return
         end
         self.ui.doc_settings:saveSetting("readingcompanion_recap", {
-            version = Policy.version, file = ctx.file, xp = ctx.xp, source = ctx.source, text = text,
+            version = Policy.version, file = ctx.file, xp = ctx.xp, source = ctx.source, text = text, options_key = ctx.options_key,
         })
         self.last_status = "generated_grounded"
         require("logger").info("ReadingCompanion: AI recap ready; source bytes", #ctx.source, "chunks", #Policy.chunks(ctx.source))
@@ -183,7 +207,7 @@ function Companion:showRecap(automatic)
         local sent, query_error = pcall(Query.query, history:getMessages(), config, callback, settings)
         if not sent then callback(false, nil, query_error) end
     end
-    local sent, err = pcall(require("readingcompanion_summary").run, ctx.source, ask, json.decode, alive, complete)
+    local sent, err = pcall(require("readingcompanion_summary").run, ctx.source, ask, json.decode, alive, complete, options)
     if not sent then complete(false,nil,err) end
 end
 

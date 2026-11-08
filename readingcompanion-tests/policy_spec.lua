@@ -25,7 +25,7 @@ check(not P.verify({paragraphs={{text=prose,evidence={123}}}},past),"non-string 
 check(not P.verify({excerpts={past}},past),"old excerpt-only response rejected")
 check(not P.verify(answer("tiny",past),past),"empty or tiny summary rejected")
 check(not P.verify(answer(prose,string.rep("a",901)),past),"oversized evidence rejected")
-local cache={version=P.version,file=ctx.file,xp=ctx.xp,source=ctx.source,text=prose}
+local cache={version=P.version,file=ctx.file,xp=ctx.xp,source=ctx.source,text=prose,options_key=ctx.options_key}
 check(P.cacheMatches(cache,ctx),"exact cache accepted")
 local function mismatch(k,v,label) local old=cache[k];cache[k]=v;check(not P.cacheMatches(cache,ctx),label);cache[k]=old end
 mismatch("xp","later","rewind cache rejected")
